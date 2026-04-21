@@ -1,128 +1,224 @@
-# 📘 Facebook News Scraper & Discord Notifier
+# 📘 Python-FB-Scraper: โปรแกรมดึงข้อมูลและแจ้งเตือนโพสต์ Facebook
 
-โปรแกรม Desktop Automation สำหรับติดตามโพสต์ Facebook ตาม Keywords
-และส่งแจ้งเตือนเข้า Discord แบบ Real-time
+[![Python](https://img.shields.io/badge/Python-3.10%2B-blue?style=for-the-badge&logo=python)](https://www.python.org/downloads/)
+[![CustomTkinter](https://img.shields.io/badge/GUI-CustomTkinter-green?style=for-the-badge)](https://customtkinter.tomschimansky.com/)
+[![Selenium](https://img.shields.io/badge/Automation-Selenium-orange?style=for-the-badge&logo=selenium)](https://www.selenium.dev/)
+[![Discord](https://img.shields.io/badge/Notification-Discord-purple?style=for-the-badge&logo=discord)](https://discord.com/)
+[![Telegram](https://img.shields.io/badge/Notification-Telegram-blue?style=for-the-badge&logo=telegram)](https://telegram.org/)
 
----
+## 💡 บทนำ
 
-## 🔧 Requirements
+โปรแกรม **Python-FB-Scraper** เป็นเครื่องมืออัตโนมัติบนเดสก์ท็อปที่พัฒนาขึ้นด้วยภาษา Python เพื่อช่วยในการดึงข้อมูลโพสต์จากเพจ Facebook ที่คุณสนใจ และส่งการแจ้งเตือนแบบเรียลไทม์ไปยัง Discord หรือ Telegram โดยอัตโนมัติ โปรแกรมนี้เหมาะสำหรับผู้ที่ต้องการติดตามข่าวสาร, โปรโมชั่น, หรือข้อมูลสำคัญจากเพจต่างๆ บน Facebook โดยไม่ต้องคอยตรวจสอบด้วยตนเอง ทำให้คุณไม่พลาดทุกความเคลื่อนไหวที่สำคัญ
 
-- Python 3.10 หรือใหม่กว่า
-- Google Chrome (เวอร์ชันล่าสุด)
-- ChromeDriver จะถูกดาวน์โหลดอัตโนมัติโดย `undetected-chromedriver`
+โปรแกรมถูกออกแบบมาให้ใช้งานง่ายด้วย **Graphical User Interface (GUI)** ที่พัฒนาด้วย CustomTkinter ทำให้ผู้ใช้ทุกระดับ ไม่ว่าจะมีพื้นฐานการเขียนโปรแกรมหรือไม่ ก็สามารถตั้งค่าและใช้งานได้ทันที นอกจากนี้ยังมีการใช้ `undetected-chromedriver` เพื่อลดความเสี่ยงในการถูกตรวจจับว่าเป็นบอท ทำให้การทำงานมีความเสถียรมากยิ่งขึ้น
 
----
+## ✨ คุณสมบัติหลัก
 
-## 📦 การติดตั้ง
+*   **ดึงข้อมูลโพสต์ Facebook อัตโนมัติ**: ติดตามและดึงข้อมูลโพสต์จากเพจ Facebook ที่กำหนด
+*   **กรองด้วย Keywords**: สามารถระบุคำค้นหา (Keywords) ที่ต้องการ เพื่อดึงเฉพาะโพสต์ที่เกี่ยวข้อง
+*   **แจ้งเตือน Real-time**: ส่งการแจ้งเตือนโพสต์ใหม่ไปยัง Discord หรือ Telegram ทันทีที่ตรวจพบ
+*   **รองรับ GUI**: ใช้งานง่ายผ่านหน้าต่างโปรแกรม (GUI) ที่ชัดเจนและเป็นมิตรกับผู้ใช้
+*   **จัดการ Session อัตโนมัติ**: บันทึกและใช้ Facebook Session Cookies เพื่อหลีกเลี่ยงการล็อกอินซ้ำบ่อยๆ
+*   **รองรับการจัดการอุปสรรค**: มีกลไกในการหยุดรอและให้ผู้ใช้แก้ไขปัญหาการยืนยันตัวตน (Checkpoint/2FA/CAPTCHA) บน Facebook ได้
+*   **บันทึกข้อมูลโพสต์**: เก็บ Post ID ที่เคยส่งไปแล้วในฐานข้อมูล SQLite เพื่อป้องกันการแจ้งเตือนซ้ำ
 
-1. **Clone หรือ Download โปรเจกต์นี้**
+## 🔧 ความต้องการของระบบ (Requirements)
 
-2. **สร้าง Virtual Environment (แนะนำ)**
-   ```bash
-   python -m venv venv
-   # Windows
-   venv\Scripts\activate
-   # macOS/Linux
-   source venv/bin/activate
-   ```
+ก่อนที่จะเริ่มต้นใช้งานโปรแกรมนี้ คุณต้องมีสิ่งต่อไปนี้ติดตั้งอยู่ในเครื่องคอมพิวเตอร์ของคุณ:
 
-3. **ติดตั้ง Dependencies**
-   ```bash
-   pip install -r requirements.txt
-   ```
+*   **Python**: เวอร์ชัน 3.10 หรือใหม่กว่า [ดาวน์โหลด Python](https://www.python.org/downloads/)
+*   **Google Chrome**: เว็บเบราว์เซอร์ Google Chrome เวอร์ชันล่าสุด
+*   **ChromeDriver**: โปรแกรม `undetected-chromedriver` จะจัดการการดาวน์โหลดและติดตั้ง ChromeDriver ที่เข้ากันได้กับ Chrome เวอร์ชันของคุณโดยอัตโนมัติ
 
----
+## 📦 การติดตั้ง (Installation)
 
-## ▶️ วิธีรันโปรแกรม
+ทำตามขั้นตอนเหล่านี้เพื่อติดตั้งและเตรียมพร้อมใช้งานโปรแกรม:
+
+1.  **ดาวน์โหลดโปรเจกต์**: คุณสามารถดาวน์โหลดซอร์สโค้ดของโปรเจกต์นี้ได้โดยการ Clone Repository หรือดาวน์โหลดเป็นไฟล์ ZIP:
+    ```bash
+    git clone https://github.com/puripong1st/Python-FB-Scraper.git
+    cd Python-FB-Scraper
+    ```
+
+2.  **สร้าง Virtual Environment (แนะนำ)**: การสร้าง Virtual Environment จะช่วยแยก Dependencies ของโปรเจกต์นี้ออกจากโปรเจกต์ Python อื่นๆ ในเครื่องของคุณ เพื่อป้องกันความขัดแย้งของเวอร์ชันไลบรารี
+    *   **สำหรับ Windows:**
+        ```bash
+        python -m venv venv
+        .\venv\Scripts\activate
+        ```
+    *   **สำหรับ macOS/Linux:**
+        ```bash
+        python3 -m venv venv
+        source venv/bin/activate
+        ```
+
+3.  **ติดตั้ง Dependencies**: เมื่อเปิดใช้งาน Virtual Environment แล้ว ให้ติดตั้งไลบรารีที่จำเป็นทั้งหมดโดยใช้คำสั่ง:
+    ```bash
+    pip install -r requirements.txt
+    ```
+    ไฟล์ `requirements.txt` ประกอบด้วยไลบรารีดังต่อไปนี้:
+    *   `customtkinter>=5.2.2`: สำหรับสร้าง GUI ที่สวยงามและทันสมัย
+    *   `selenium>=4.20.0`: สำหรับควบคุมเว็บเบราว์เซอร์ Chrome เพื่อดึงข้อมูลจาก Facebook
+    *   `undetected-chromedriver>=3.5.5`: เป็นส่วนเสริมของ Selenium ที่ช่วยให้การทำงานอัตโนมัติบน Chrome ยากต่อการตรวจจับว่าเป็นบอท
+    *   `requests>=2.31.0`: สำหรับส่งคำขอ HTTP ไปยัง Discord/Telegram Webhook เพื่อส่งการแจ้งเตือน
+
+## ▶️ วิธีรันโปรแกรม (How to Run)
+
+หลังจากติดตั้งเสร็จสิ้น คุณสามารถรันโปรแกรมได้โดยใช้คำสั่ง:
 
 ```bash
 python main.py
 ```
 
----
+โปรแกรมจะเปิดหน้าต่าง GUI ขึ้นมาให้คุณตั้งค่า
 
-## 📋 คู่มือใช้งาน GUI
+## 📋 คู่มือใช้งาน GUI สำหรับผู้เริ่มต้น
+
+โปรแกรมถูกแบ่งออกเป็นส่วนๆ เพื่อให้ง่ายต่อการตั้งค่า:
 
 ### Section 1 — Facebook Credentials
-- กรอก **Email** และ **Password** ของบัญชี Facebook ที่ต้องการใช้ Scrape
-- รหัสผ่านจะถูกปิดบังด้วย ●●● เพื่อความปลอดภัย
+
+*   **Email**: กรอกอีเมลของบัญชี Facebook ที่คุณต้องการใช้ในการ Scrape ข้อมูล
+*   **Password**: กรอกรหัสผ่านของบัญชี Facebook ของคุณ รหัสผ่านจะถูกปิดบังด้วย ●●● เพื่อความปลอดภัย
+
+    **คำแนะนำ**: แนะนำให้ใช้บัญชี Facebook ที่สร้างขึ้นมาเพื่องานนี้โดยเฉพาะ ไม่ใช่บัญชีส่วนตัว เพื่อลดความเสี่ยงที่บัญชีหลักของคุณจะถูกบล็อก
 
 ### Section 2 — Target Settings
-- **URL เพจเป้าหมาย**: กรอก Facebook Page URL แต่ละบรรทัด = 1 เพจ
-  ```
-  https://www.facebook.com/BBCnewsThai
-  https://www.facebook.com/voathai
-  ```
-- **Keywords**: คั่นด้วยลูกน้ำ `,` หากเว้นว่างจะดึงทุกโพสต์
-  ```
-  ข่าว, ด่วน, สำคัญ, เตือน
-  ```
+
+*   **URL เพจเป้าหมาย**: กรอก URL ของเพจ Facebook ที่คุณต้องการให้โปรแกรมดึงข้อมูล โดยใส่ทีละ 1 URL ต่อ 1 บรรทัด ตัวอย่างเช่น:
+    ```
+    https://www.facebook.com/BBCnewsThai
+    https://www.facebook.com/voathai
+    ```
+*   **Keywords**: กรอกคำค้นหาที่คุณต้องการให้โปรแกรมใช้ในการกรองโพสต์ หากพบโพสต์ที่มีคำเหล่านี้ โปรแกรมจะส่งการแจ้งเตือน หากเว้นว่างไว้ โปรแกรมจะดึงทุกโพสต์ที่พบ ตัวอย่างเช่น:
+    ```
+    ข่าว, ด่วน, สำคัญ, เตือน
+    ```
+    **หมายเหตุ**: ใช้เครื่องหมายลูกน้ำ (`,`) ในการคั่นแต่ละ Keywords
 
 ### Section 3 — Timeframe & Loop
-- **ดึงโพสต์ย้อนหลัง**: จำนวนชั่วโมง (เช่น `24` = ดึงโพสต์ย้อนหลัง 24 ชม.)
-- **วนลูปทุก**: ระยะเวลาระหว่าง Cycle เป็นนาที (เช่น `30` = ทำซ้ำทุก 30 นาที)
 
-### Section 4 — Discord Webhook
-- วาง **Webhook URL** จาก Discord Server ของคุณ
-  ```
-  https://discord.com/api/webhooks/XXXXXXXX/YYYYYYYY
-  ```
+*   **ดึงโพสต์ย้อนหลัง**: กำหนดจำนวนชั่วโมงที่โปรแกรมจะย้อนกลับไปดึงโพสต์ เช่น หากใส่ `24` โปรแกรมจะดึงโพสต์ที่เผยแพร่ภายใน 24 ชั่วโมงที่ผ่านมา
+*   **วนลูปทุก**: กำหนดระยะเวลาเป็นนาทีที่โปรแกรมจะรอ ก่อนที่จะเริ่มรอบการสแกนเพจใหม่ เช่น หากใส่ `30` โปรแกรมจะทำงานซ้ำทุก 30 นาที
+
+    **คำแนะนำ**: เพื่อลดความเสี่ยงในการถูก Facebook ตรวจจับและบล็อก แนะนำให้ตั้งค่า `วนลูปทุก` อย่างน้อย 15-30 นาทีขึ้นไป
+
+### Section 4 — Discord/Telegram Webhook
+
+*   **Discord Webhook URL**: วาง Webhook URL ที่คุณได้รับจาก Discord Server ของคุณ โปรแกรมจะใช้ URL นี้ในการส่งการแจ้งเตือนไปยังช่อง Discord ที่คุณกำหนด ตัวอย่างเช่น:
+    ```
+    https://discord.com/api/webhooks/XXXXXXXX/YYYYYYYY
+    ```
+*   **Telegram Bot Token**: กรอก Token ของ Telegram Bot ของคุณ (เช่น `123456:ABC-DEF1234ghIJK-lmnO_pqrstuvwxyz`) เพื่อให้โปรแกรมสามารถส่งข้อความผ่านบอทได้
+*   **Telegram Chat ID**: กรอก Chat ID ของกลุ่มหรือผู้ใช้ที่คุณต้องการให้บอทส่งข้อความไปหา
+
+    **วิธีสร้าง Discord Webhook**: [ดูคู่มือ](https://support.discord.com/hc/en-us/articles/228383668-Intro-to-Webhooks)
+    **วิธีสร้าง Telegram Bot และหา Chat ID**: [ดูคู่มือ](https://core.telegram.org/bots/api#creating-a-new-bot)
 
 ### Section 5 — Controls
-| ปุ่ม | หน้าที่ |
-|------|---------|
-| ▶ Start | เริ่มทำงาน |
-| ⏹ Stop | หยุดทำงาน |
-| ▶▶ Resume | กดหลังจากแก้ Checkpoint/2FA/CAPTCHA บน Browser แล้ว |
 
----
+| ปุ่ม | หน้าที่ |
+| :--- | :--- |
+| ▶ Start | เริ่มต้นการทำงานของโปรแกรม Scraper |
+| ⏹ Stop | หยุดการทำงานของโปรแกรม Scraper |
+| ▶▶ Resume | ใช้เมื่อคุณแก้ไขปัญหา Checkpoint/2FA/CAPTCHA บนเบราว์เซอร์เสร็จแล้ว เพื่อให้โปรแกรมกลับมาทำงานต่อ |
 
 ## 🚨 การจัดการ Checkpoint / 2FA / CAPTCHA
 
-เมื่อ Facebook บล็อก Bot:
-1. โปรแกรมจะ **หยุดทำงานอัตโนมัติ** และส่งแจ้งเตือนเข้า Discord
-2. **เปิด Browser** ที่โปรแกรมเปิดค้างไว้ แล้วแก้ไข Checkpoint/2FA ด้วยตัวเอง
-3. กลับมาที่หน้าโปรแกรมแล้วกดปุ่ม **Resume**
-4. โปรแกรมจะกลับมาทำงานต่อจากจุดที่หยุด
+บางครั้ง Facebook อาจตรวจจับกิจกรรมที่ผิดปกติและบล็อกบัญชีของคุณชั่วคราว ซึ่งอาจนำไปสู่หน้า **Checkpoint**, **การยืนยันตัวตนแบบ 2FA (Two-Factor Authentication)** หรือ **CAPTCHA** หากเกิดเหตุการณ์นี้ขึ้น โปรแกรมจะจัดการดังนี้:
 
----
+1.  โปรแกรมจะ **หยุดทำงานอัตโนมัติ** และส่งแจ้งเตือนไปยัง Discord/Telegram (หากตั้งค่าไว้)
+2.  คุณจะต้อง **เปิดหน้าต่างเบราว์เซอร์ Chrome** ที่โปรแกรมเปิดค้างไว้ขึ้นมา (โปรแกรมจะเปิดเบราว์เซอร์ไว้เบื้องหลัง) และดำเนินการแก้ไขปัญหาการยืนยันตัวตนหรือ CAPTCHA ด้วยตัวคุณเอง
+3.  เมื่อแก้ไขปัญหาบนเบราว์เซอร์เสร็จสิ้นแล้ว ให้กลับมาที่หน้าต่างโปรแกรม **Python-FB-Scraper** และกดปุ่ม **▶▶ Resume**
+4.  โปรแกรมจะกลับมาทำงานต่อจากจุดที่หยุดไป
 
 ## 🗄️ ไฟล์ที่โปรแกรมสร้าง
 
-| ไฟล์ | คำอธิบาย |
-|------|---------|
-| `scraper_data.db` | SQLite database เก็บ Post ID ที่ส่งไปแล้ว (ป้องกันซ้ำ) |
-| `fb_cookies.pkl` | Session cookies สำหรับล็อกอินโดยไม่ต้องกรอกรหัสใหม่ |
+โปรแกรมจะสร้างไฟล์บางอย่างขึ้นมาเพื่อช่วยในการทำงาน:
 
----
+| ไฟล์ | คำอธิบาย |
+| :--- | :--- |
+| `scraper_data.db` | ไฟล์ฐานข้อมูล SQLite ที่ใช้เก็บ `post_id` ของโพสต์ที่เคยถูกตรวจพบและส่งแจ้งเตือนไปแล้ว เพื่อป้องกันการแจ้งเตือนซ้ำซ้อน |
+| `fb_cookies.pkl` | ไฟล์ที่เก็บ Session Cookies ของ Facebook ซึ่งช่วยให้โปรแกรมสามารถล็อกอินเข้าสู่ Facebook ได้โดยไม่ต้องกรอกอีเมลและรหัสผ่านใหม่ทุกครั้งที่รันโปรแกรม |
 
 ## ⚠️ คำเตือนและข้อควรระวัง
 
-- **ใช้ในขอบเขตของกฎหมายและ Terms of Service ของ Facebook**
-- แนะนำให้ใช้บัญชีที่สร้างขึ้นมาเพื่องานนี้โดยเฉพาะ ไม่ใช่บัญชีส่วนตัว
-- Facebook อาจตรวจจับและบล็อก Bot ได้เสมอ ให้ตั้ง Loop interval อย่างน้อย 15-30 นาที
-- `undetected-chromedriver` ลดความเสี่ยงถูก detect แต่ไม่ได้ป้องกัน 100%
+*   **การใช้งานอย่างรับผิดชอบ**: โปรดใช้โปรแกรมนี้ในขอบเขตของกฎหมายและ **Terms of Service** ของ Facebook การใช้งานที่ผิดวัตถุประสงค์อาจนำไปสู่การถูกบล็อกบัญชีหรือปัญหาทางกฎหมายได้
+*   **บัญชี Facebook**: แนะนำอย่างยิ่งให้ใช้บัญชี Facebook ที่สร้างขึ้นมาเพื่องาน Scraper โดยเฉพาะ ไม่ควรใช้บัญชีส่วนตัวของคุณ
+*   **การถูกบล็อก**: Facebook มีระบบตรวจจับบอทที่ซับซ้อน แม้ว่า `undetected-chromedriver` จะช่วยลดความเสี่ยง แต่ก็ไม่สามารถป้องกันการถูกบล็อกได้ 100% ควรตั้งค่า `วนลูปทุก` (Loop interval) อย่างน้อย 15-30 นาที เพื่อลดความถี่ในการเข้าถึงข้อมูล
+*   **การอัปเดต Facebook**: การเปลี่ยนแปลงโครงสร้างหน้าเว็บของ Facebook อาจส่งผลให้โปรแกรมทำงานผิดปกติได้ หากเกิดปัญหา โปรดตรวจสอบว่ามีเวอร์ชันอัปเดตของโปรแกรมหรือไม่
 
----
+## 🏗️ โครงสร้างโค้ด (Code Structure) สำหรับนักพัฒนา
 
-## 🏗️ โครงสร้างโค้ด
+โปรเจกต์นี้ถูกออกแบบมาในลักษณะ Modular เพื่อให้ง่ายต่อการทำความเข้าใจและบำรุงรักษา โครงสร้างหลักของไฟล์ `main.py` ประกอบด้วยคลาสต่างๆ ที่รับผิดชอบหน้าที่เฉพาะ:
 
 ```
 main.py
-├── DatabaseManager     — จัดการ SQLite (seen_posts table)
-├── DiscordNotifier     — ส่ง Webhook notifications
-├── FacebookScraper     — Selenium automation + scraping logic
-└── ScraperApp          — CustomTkinter GUI + threading
+├── DatabaseManager     — จัดการฐานข้อมูล SQLite สำหรับเก็บ Post ID ที่ถูกตรวจพบแล้ว
+├── DiscordNotifier     — จัดการการส่งแจ้งเตือนไปยัง Discord Webhook
+├── TelegramNotifier    — จัดการการส่งแจ้งเตือนไปยัง Telegram Bot
+├── FacebookScraper     — ส่วนหลักที่ใช้ Selenium ในการควบคุมเบราว์เซอร์, ดึงข้อมูลโพสต์, และจัดการกับอุปสรรคต่างๆ บน Facebook
+└── ScraperApp          — คลาสที่สร้าง Graphical User Interface (GUI) ด้วย CustomTkinter และจัดการ Logic การทำงานหลักของโปรแกรม รวมถึงการใช้ Threading เพื่อให้ GUI ไม่ค้างระหว่างการ Scrape
 ```
 
----
+### รายละเอียดคลาสหลัก:
 
-## 📡 รูปแบบการแจ้งเตือน Discord
+1.  **`DatabaseManager`**
+    *   รับผิดชอบในการเชื่อมต่อและจัดการกับฐานข้อมูล SQLite (`scraper_data.db`)
+    *   มีเมธอด `_create_tables()` สำหรับสร้างตาราง `seen_posts` เพื่อเก็บ `post_id`, `page_url`, `post_url`, และ `detected_at`
+    *   เมธอด `is_seen(post_id)` ใช้ตรวจสอบว่าโพสต์นั้นเคยถูกตรวจพบแล้วหรือไม่
+    *   เมธอด `mark_seen(post_id, page_url, post_url)` ใช้บันทึกโพสต์ที่ตรวจพบใหม่ลงในฐานข้อมูล
 
-| Event | ข้อความ |
-|-------|---------|
-| เริ่มทำงาน | 🟢 เริ่มระบบ Scraper + เวลา |
-| พบโพสต์ใหม่ | Rich Embed พร้อมลิงก์ + เนื้อหา |
-| จบรอบ | ✅ สรุปรอบ + เวลาที่ใช้ + รอบถัดไปใน X นาที |
-| ติด Obstacle | 🚨 @everyone แจ้งเตือน + ประเภทอุปสรรค |
-| หยุดทำงาน | 🔴 แจ้งว่าหยุดแล้ว |
+2.  **`DiscordNotifier`** และ **`TelegramNotifier`**
+    *   คลาสเหล่านี้ทำหน้าที่ส่งข้อความแจ้งเตือนไปยังแพลตฟอร์มที่เกี่ยวข้อง
+    *   มีเมธอดสำหรับส่งข้อความเริ่มต้น (`send_start`), โพสต์ใหม่ (`send_post` พร้อม Rich Embed สำหรับ Discord และรูปภาพ/ปุ่มสำหรับ Telegram), สรุปการทำงานแต่ละรอบ (`send_cycle_complete`), แจ้งเตือนเมื่อติดอุปสรรค (`send_obstacle`), และแจ้งเตือนเมื่อหยุดทำงาน (`send_stopped`)
+    *   `TelegramNotifier` มีการเพิ่มฟังก์ชัน `_send_photo` เพื่อรองรับการส่งรูปภาพใน Telegram และ `TelegramListener` เพื่อดักจับการกดปุ่มจากผู้ใช้
+
+3.  **`FacebookScraper`**
+    *   เป็นหัวใจหลักของการดึงข้อมูล ใช้ไลบรารี Selenium และ `undetected-chromedriver`
+    *   เมธอด `_init_driver()` เริ่มต้น ChromeDriver และตั้งค่าต่างๆ เช่น การปิดแจ้งเตือน, การตั้งค่า User-Agent
+    *   เมธอด `login_facebook()` จัดการการล็อกอินเข้าสู่ Facebook โดยใช้ Cookies ที่บันทึกไว้ หรือล็อกอินใหม่หากไม่มี Cookies
+    *   เมธอด `_detect_obstacle()` และ `_handle_obstacle()` ตรวจจับและจัดการกับปัญหาการยืนยันตัวตนต่างๆ บน Facebook
+    *   เมธอด `scrape_page()` เป็นส่วนที่วนลูปเพื่อเข้าถึงเพจ, เลื่อนหน้าจอ (`_slow_scroll`), ดึง `article` element, วิเคราะห์ `post_id`, `post_timestamp`, `post_text`, และ `image_url`
+    *   มีการกรองโพสต์ตาม `keywords` และ `hours_back` ที่กำหนด
+    *   ใช้ `threading.Event` (`_stop_event`, `_resume_event`) เพื่อควบคุมการหยุดและทำงานต่อของ Scraper
+
+4.  **`ScraperApp`**
+    *   คลาสนี้สร้างหน้าต่าง GUI หลักของโปรแกรมด้วย CustomTkinter
+    *   จัดการ Input จากผู้ใช้สำหรับ Facebook Credentials, Target Settings, Timeframe & Loop, และ Discord/Telegram Webhook
+    *   มีปุ่มควบคุม `Start`, `Stop`, `Resume` ที่เชื่อมโยงกับการทำงานของ `FacebookScraper`
+    *   ใช้ `threading` เพื่อรัน `FacebookScraper` ใน Background Thread ทำให้ GUI ยังคงตอบสนองได้ในขณะที่ Scraper กำลังทำงาน
+    *   มี `log_queue` และ `update_log_display()` เพื่อแสดง Log การทำงานของโปรแกรมใน GUI แบบเรียลไทม์
+
+## 📡 รูปแบบการแจ้งเตือน Discord และ Telegram
+
+### Discord
+
+| Event | ข้อความ/รูปแบบการแจ้งเตือน |
+| :--- | :--- |
+| เริ่มทำงาน | 🟢 **เริ่มระบบ Scraper** | เวลา: `[วันที่ เวลา]` |
+| พบโพสต์ใหม่ | Rich Embed พร้อมหัวข้อ, เนื้อหา (ตัดทอนหากยาวเกินไป), ลิงก์โพสต์ต้นฉบับ, Keywords ที่พบ, ชื่อเพจ, URL เพจ, เวลาที่ตรวจพบ และรูปภาพ (ถ้ามี) |
+| จบรอบ | ✅ **สแกนรอบนี้เสร็จสิ้น** | ระยะเวลาที่ใช้: `[Xm Ys]` | รอวนลูปทำงานรอบต่อไปในอีก `[Z นาที]` |
+| ติด Obstacle | 🚨 @everyone **บอทติดหน้า [ประเภทอุปสรรค]** | กรุณาเข้ามากดแก้ในหน้าต่างเบราว์เซอร์ด่วน! แล้วกดปุ่ม **Resume** บนโปรแกรม |
+| หยุดทำงาน | 🔴 **ระบบ Scraper หยุดทำงานแล้ว** (หยุดโดยผู้ใช้) |
+
+### Telegram
+
+| Event | ข้อความ/รูปแบบการแจ้งเตือน |
+| :--- | :--- |
+| เริ่มทำงาน | 🟢 **เริ่มระบบ Scraper**\nเวลา: `[วันที่ เวลา]` |
+| พบโพสต์ใหม่ | ข้อความ HTML พร้อมหัวข้อ, เนื้อหา (ตัดทอนหากยาวเกินไป), Keywords ที่พบ, ลิงก์โพสต์ต้นฉบับ และรูปภาพ (ถ้ามี) พร้อมปุ่ม `💾 บันทึกข่าวนี้`, `🗑️ ลบข้อความ`, `🌐 ดูข้อมูลเพจเพิ่มเติม` |
+| จบรอบ | ✅ **สแกนรอบนี้เสร็จสิ้น**\nระยะเวลาที่ใช้: `[Xm Ys]`\nรอทำงานรอบต่อไปในอีก `[Z นาที]` |
+| ติด Obstacle | 🚨 **บอทติดหน้า [ประเภทอุปสรรค]**\nกรุณาเข้ามากดแก้ในเบราว์เซอร์ด่วน!\nแล้วกดปุ่ม **Resume** บนโปรแกรม |
+| หยุดทำงาน | 🔴 **ระบบ Scraper หยุดทำงานแล้ว** (หยุดโดยผู้ใช้) |
+
+## 🤝 การมีส่วนร่วม (Contributing)
+
+ยินดีต้อนรับทุกท่านที่สนใจร่วมพัฒนาโปรเจกต์นี้! หากคุณมีข้อเสนอแนะ, พบ Bug, หรือต้องการเพิ่มคุณสมบัติใหม่ๆ สามารถทำได้โดย:
+
+1.  Fork Repository นี้
+2.  สร้าง Branch ใหม่ (`git checkout -b feature/YourFeature`)
+3.  ทำการเปลี่ยนแปลงของคุณ
+4.  Commit การเปลี่ยนแปลง (`git commit -m 'Add new feature'`) 
+5.  Push ไปยัง Branch ของคุณ (`git push origin feature/YourFeature`)
+6.  สร้าง Pull Request
