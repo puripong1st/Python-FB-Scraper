@@ -19,7 +19,7 @@ import os
 import pickle
 from datetime import datetime, timedelta
 from queue import Queue, Empty
-
+import hashlib
 # Selenium imports
 from selenium.webdriver.common.by import By
 from selenium.webdriver.common.keys import Keys
@@ -531,7 +531,7 @@ class FacebookScraper:
         for pattern in patterns:
             m = re.search(pattern, url)
             if m: return m.group(1)
-        return str(hash(url))
+        return hashlib.md5(url.encode('utf-8')).hexdigest()
 
     def _parse_post_timestamp(self, driver, article_element) -> datetime | None:
         now = datetime.now()
