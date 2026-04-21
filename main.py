@@ -52,10 +52,28 @@ class DatabaseManager:
                 CREATE TABLE IF NOT EXISTS seen_posts (
                     post_id TEXT PRIMARY KEY,
                     page_url TEXT,
-                    post_url TEXT,
+                    post_url TEXT UNIQUE,
                     detected_at TEXT
                 )
             """)
+            # ── Migrate: เพิ่ม UNIQUE index บน post_url สำหรับ DB เดิมที่มีอยู่แล้ว ──
+            try:
+                self.conn.execute("""
+                    CREATE UNIQUE INDEX IF NOT EXISTS idx_post_url_unique
+                    ON seen_posts(post_url)
+                """)
+            except sqlite3.Error:
+                pass
+            # ── ล้างข้อมูลซ้ำที่มีอยู่เดิม (เก็บ row ที่ post_id น้อยสุดของแต่ละ post_url) ──
+            try:
+                self.conn.execute("""
+                    DELETE FROM seen_posts
+                    WHERE rowid NOT IN (
+                        SELECT MIN(rowid) FROM seen_posts GROUP BY post_url
+                    )
+                """)
+            except sqlite3.Error:
+                pass
             self.conn.commit()
 
     def is_seen(self, post_id: str) -> bool:
@@ -68,13 +86,22 @@ class DatabaseManager:
     def mark_seen(self, post_id: str, page_url: str, post_url: str):
         with self._lock:
             try:
+                # INSERT OR IGNORE จะ skip ถ้า post_id หรือ post_url ซ้ำ (UNIQUE constraint ทั้งสองคอลัมน์)
                 self.conn.execute(
                     "INSERT OR IGNORE INTO seen_posts (post_id, page_url, post_url, detected_at) VALUES (?, ?, ?, ?)",
                     (post_id, page_url, post_url, datetime.now().isoformat()),
                 )
                 self.conn.commit()
-            except sqlite3.Error as e:
+            except sqlite3.Error:
                 pass
+
+    def is_seen_by_url(self, post_url: str) -> bool:
+        """ตรวจ duplicate ด้วย URL โดยตรง ครอบคลุมกรณีที่ post_id แตกต่างแต่ URL เหมือนกัน"""
+        with self._lock:
+            cur = self.conn.execute(
+                "SELECT 1 FROM seen_posts WHERE post_url = ?", (post_url,)
+            )
+            return cur.fetchone() is not None
 
     def close(self):
         self.conn.close()
@@ -85,6 +112,21 @@ class DatabaseManager:
 # ─────────────────────────────────────────────────────────────────────────────
 
 class DiscordNotifier:
+    # สีประจำแต่ละเพจ — มองปั๊บรู้ทันทีว่ามาจากไหน
+    PAGE_COLORS = {
+        "khaosod":              0xE53935,  # แดงเข้ม
+        "TheReportersTH":       0x1565C0,  # น้ำเงินเข้ม
+        "NationOnline":         0x2E7D32,  # เขียวเข้ม
+        "MorningNewsTV3":       0x6A1B9A,  # ม่วง
+        "ThePoliticsByMatichon":0xE65100,  # ส้มเข้ม
+        "MatichonOnline":       0xF57F17,  # เหลืองทอง
+        "thestandardth":        0x00838F,  # ฟ้าเทา
+        "Ch7HDNews":            0xC62828,  # แดงเลือดหมู
+        "thairath":             0xAD1457,  # ชมพูเข้ม
+        "tnamcot":              0x00695C,  # เขียวน้ำทะเล
+    }
+    DEFAULT_COLOR = 0x1877F2  # Facebook Blue
+
     def __init__(self, webhook_url: str):
         self.webhook_url = webhook_url
 
@@ -102,46 +144,127 @@ class DiscordNotifier:
         except requests.RequestException:
             return False
 
-    def send_start(self):
-        payload = {"content": f"🟢 **เริ่มระบบ Scraper** | เวลา: `{datetime.now().strftime('%d/%m/%Y %H:%M:%S')}`"}
-        self._send(payload)
+    def _utc_now_iso(self) -> str:
+        """Discord timestamp ต้องเป็น UTC ISO 8601"""
+        from datetime import timezone
+        return datetime.now(timezone.utc).isoformat()
 
-    def send_post(self, page_name: str, page_url: str, post_url: str, content: str, found_keywords: list, image_url: str = None):
-        description = content[:4000] + "\n\n...[อ่านต่อในลิงก์]" if len(content) > 4000 else content
-        keywords_str = ", ".join(found_keywords) if found_keywords else "-"
+    def _smart_truncate(self, text: str, limit: int, post_url: str) -> str:
+        """ตัดข้อความอย่างฉลาด — ไม่ตัดกลางคำ"""
+        if len(text) <= limit:
+            return text
+        cut = text[:limit]
+        # หาจุดตัดที่สมเหตุสมผล (บรรทัดใหม่ หรือจบประโยค)
+        for sep in ["\n\n", "\n", "। ", "。", ". "]:
+            idx = cut.rfind(sep)
+            if idx > limit * 0.65:
+                cut = cut[:idx]
+                break
+        return cut + f"\n\n*[…อ่านต่อในโพสต์ต้นฉบับ]({post_url})*"
+
+    def send_start(self, page_count: int = 0, keyword_count: int = 0, loop_min: int = 0):
+        now = datetime.now()
+        embed = {
+            "color": 0x43A047,  # เขียว
+            "author": {
+                "name": "🟢  ระบบ Scraper เริ่มทำงานแล้ว",
+            },
+            "fields": [
+                {"name": "📋  เพจที่ติดตาม",    "value": f"`{page_count} เพจ`",      "inline": True},
+                {"name": "🔑  Keywords ทั้งหมด", "value": f"`{keyword_count} คำ`",    "inline": True},
+                {"name": "🔄  วนซ้ำทุก",         "value": f"`{loop_min} นาที`",       "inline": True},
+            ],
+            "footer": {"text": "FB News Monitor  •  PRP"},
+            "timestamp": self._utc_now_iso(),
+        }
+        self._send({"embeds": [embed]})
+
+    def send_post(self, page_name: str, page_url: str, post_url: str, content: str,
+                  found_keywords: list, image_url: str = None):
+        color = self.PAGE_COLORS.get(page_name, self.DEFAULT_COLOR)
+        now   = datetime.now()
+
+        # ── เนื้อหาโพสต์ (ตัดฉลาด ≤ 900 ตัวอักษร) ──────────────────────────
+        content_display = self._smart_truncate(content, 900, post_url)
+
+        # ── Keywords แสดงเป็น chip แบบ `คำ` ──────────────────────────────────
+        if found_keywords:
+            kw_chips = "  ".join(f"`{kw}`" for kw in found_keywords)
+            # Discord field value limit 1024 chars
+            if len(kw_chips) > 1000:
+                kw_chips = kw_chips[:997] + "…"
+        else:
+            kw_chips = "*—*"
 
         embed = {
-            "title": f"📢 ข่าวจาก {page_name}",
-            "description": description,
-            "url": post_url,
-            "color": 0x1877F2,
+            "color": color,
+            "author": {
+                "name": f"📰  {page_name}",
+                "url":  page_url,
+            },
+            "title": "คลิกเพื่ออ่านโพสต์ต้นฉบับ  →",
+            "url":   post_url,
+            "description": content_display,
             "fields": [
-                {"name": "🔑 Keywords", "value": keywords_str, "inline": True},
-                {"name": "🌐 เพจ", "value": page_url, "inline": True},
-                {"name": "🔗 Post URL", "value": post_url, "inline": False},
-                {"name": "🕐 เวลาตรวจพบโพสต์", "value": datetime.now().strftime("%d/%m/%Y %H:%M:%S"), "inline": False},
+                {
+                    "name":   "🔍  Keywords ที่ตรงกัน",
+                    "value":  kw_chips,
+                    "inline": False,
+                },
             ],
-            "footer": {"text": "FB News Scraper By PRP"},
+            "footer": {
+                "text": f"FB News Monitor  •  PRP  •  ตรวจพบ {now.strftime('%d %b %Y  %H:%M')} น.",
+            },
+            "timestamp": self._utc_now_iso(),
         }
 
-        # ✨ [เพิ่มส่วนนี้] ถ้าระบบดึงรูปภาพได้ ให้ใส่รูปเข้าไปใน Embed ด้วย
         if image_url:
             embed["image"] = {"url": image_url}
 
+        # content ด้านนอก embed — กำหนดให้ ping mention ถ้าต้องการได้ที่นี่
         self._send({"embeds": [embed]})
 
     def send_cycle_complete(self, duration_sec: float, next_run_min: int):
         mins = int(duration_sec // 60)
         secs = int(duration_sec % 60)
-        payload = {"content": f"✅ **สแกนรอบนี้เสร็จสิ้น** | ระยะเวลาที่ใช้: `{mins}m {secs}s` | รอวนลูปทำงานรอบต่อไปในอีก `{next_run_min} นาที`"}
-        self._send(payload)
+        embed = {
+            "color": 0x1E88E5,  # น้ำเงิน
+            "author": {"name": "✅  สแกนรอบนี้เสร็จสิ้น"},
+            "fields": [
+                {"name": "⏱  เวลาที่ใช้",         "value": f"`{mins} นาที {secs} วินาที`", "inline": True},
+                {"name": "⏳  รอบถัดไปในอีก",       "value": f"`{next_run_min} นาที`",       "inline": True},
+            ],
+            "footer": {"text": "FB News Monitor  •  PRP"},
+            "timestamp": self._utc_now_iso(),
+        }
+        self._send({"embeds": [embed]})
 
     def send_obstacle(self, obstacle_type: str):
-        payload = {"content": f"🚨 @everyone **บอทติดหน้า {obstacle_type}** | กรุณาเข้ามากดแก้ในหน้าต่างเบราว์เซอร์ด่วน! แล้วกดปุ่ม **Resume** บนโปรแกรม"}
-        self._send(payload)
+        embed = {
+            "color": 0xE53935,  # แดง
+            "author": {"name": "🚨  บอทหยุดทำงานชั่วคราว — ต้องการความช่วยเหลือ!"},
+            "description": (
+                f"**บอทติดหน้า:** `{obstacle_type}`\n\n"
+                "**วิธีแก้ไข:**\n"
+                "1️⃣  เปิดหน้าต่าง Browser\n"
+                "2️⃣  แก้ไขตามที่หน้าจอแจ้ง\n"
+                "3️⃣  กดปุ่ม **Resume** บนโปรแกรม\n\n"
+                "*บอทจะทำงานต่ออัตโนมัติหลังกด Resume*"
+            ),
+            "footer": {"text": "FB News Monitor  •  PRP"},
+            "timestamp": self._utc_now_iso(),
+        }
+        self._send({"content": "@everyone", "embeds": [embed]})
 
     def send_stopped(self):
-        self._send({"content": "🔴 **ระบบ Scraper หยุดทำงานแล้ว** (หยุดโดยผู้ใช้)"})
+        embed = {
+            "color": 0x757575,  # เทา
+            "author": {"name": "🔴  ระบบ Scraper หยุดทำงานแล้ว"},
+            "description": "*หยุดโดยผู้ใช้งาน — กด Start เพื่อเริ่มใหม่*",
+            "footer": {"text": "FB News Monitor  •  PRP"},
+            "timestamp": self._utc_now_iso(),
+        }
+        self._send({"embeds": [embed]})
 
 
 class TelegramNotifier:
@@ -600,15 +723,31 @@ class FacebookScraper:
                 if self._stop_event.is_set(): return 0
 
             scroll_rounds = 0
-            MAX_SCROLL_ROUNDS = 20
+            MAX_SCROLL_ROUNDS = 30        # เพิ่มจาก 20 เป็น 30
+            last_article_count = 0
+            no_growth_rounds = 0
+            MAX_NO_GROWTH = 4             # ยอมให้โหลดไม่เพิ่มได้ 4 รอบก่อน break
 
             while not self._stop_event.is_set() and scroll_rounds < MAX_SCROLL_ROUNDS:
-                self._slow_scroll(scrolls=3, pause=1.8)
+                self._slow_scroll(scrolls=4, pause=2.0)   # เพิ่ม scroll จาก 3→4, pause จาก 1.8→2.0
                 scroll_rounds += 1
                 articles = self._get_articles()
                 if not articles:
                     self.log(f"⚠️ ไม่พบ article elements บนเพจ {page_name}")
                     break
+
+                current_count = len(articles)
+                if current_count > last_article_count:
+                    # หน้ายังโหลดเนื้อหาใหม่อยู่ → รีเซ็ตตัวนับ
+                    no_growth_rounds = 0
+                    last_article_count = current_count
+                    self.log(f"📜 [{page_name}] Scroll {scroll_rounds} | โหลด article รวม: {current_count}")
+                else:
+                    no_growth_rounds += 1
+                    self.log(f"📜 [{page_name}] Scroll {scroll_rounds} | ไม่มีเนื้อหาใหม่ ({no_growth_rounds}/{MAX_NO_GROWTH})")
+                    if no_growth_rounds >= MAX_NO_GROWTH:
+                        self.log(f"📄 [{page_name}] หน้าไม่โหลดเพิ่มแล้ว — จบการสแกน")
+                        break
 
                 new_in_this_round = False
                 for article in articles:
@@ -636,10 +775,14 @@ class FacebookScraper:
 
                         if post_url_clean in seen_this_run: continue
                         seen_this_run.add(post_url_clean)
-                        new_in_this_round = True
+                        new_in_this_round = True  # พบ article ที่ยังไม่เคยเห็นใน run นี้
 
-                        post_id = self._extract_post_id(post_url)
-                        if not post_id or self.db.is_seen(post_id): continue
+                        # ── ใช้ cleaned URL เพื่อ extract post_id เสมอ ──────────────────
+                        # ป้องกัน: URL เดียวกัน query params ต่างกัน → MD5 ต่างกัน → บันทึกซ้ำใน DB
+                        post_id = self._extract_post_id(post_url_clean)
+                        if not post_id: continue
+                        # ตรวจสอบทั้ง post_id และ URL โดยตรง (double guard)
+                        if self.db.is_seen(post_id) or self.db.is_seen_by_url(post_url_clean): continue
 
                         post_time = self._parse_post_timestamp(self.driver, article)
                         if post_time is not None:
@@ -709,8 +852,8 @@ class FacebookScraper:
                         self.log(f"⚠️ ข้ามโพสต์ที่อ่านไม่ได้: {type(e).__name__}")
                         continue
 
-                if not new_in_this_round:
-                    self.log(f"📄 ไม่มีโพสต์ใหม่ให้โหลดแล้วบนเพจ {page_name} — จบการสแกน")
+                if not new_in_this_round and no_growth_rounds >= MAX_NO_GROWTH:
+                    self.log(f"📄 ไม่มีโพสต์ใหม่และหน้าหยุดโหลดแล้ว บนเพจ {page_name} — จบการสแกน")
                     break
 
             self.log(f"📊 สแกนเพจ {page_name} เสร็จ | Scroll {scroll_rounds} รอบ | โพสต์ใหม่: {new_posts}")
@@ -729,7 +872,7 @@ class FacebookScraper:
                     self._stop_event.set()
                     return
 
-            self.discord.send_start()
+            self.discord.send_start(len(page_urls), len(keywords), loop_minutes)
             self.tg.send_start()
 
             while not self._stop_event.is_set():
