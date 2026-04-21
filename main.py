@@ -111,6 +111,22 @@ class DatabaseManager:
                 # [3] log แทน silent pass
                 print(f"[DB] mark_seen error: {e}")
 
+    def cleanup_old_data(self):
+        """ลบโพสต์ที่เก่ากว่า 24 ชั่วโมง และทำ VACUUM เพื่อคืนพื้นที่บนดิสก์"""
+        with self._lock:
+            try:
+                # ลบแถวที่ detected_at เก่ากว่า 1 วัน
+                self.conn.execute("DELETE FROM seen_posts WHERE detected_at < datetime('now', '-1 day')")
+                self.conn.commit()
+                
+                # ทำ VACUUM เพื่อจัดเรียงข้อมูลและลดขนาดไฟล์ .db
+                self.conn.execute("VACUUM")
+                self.conn.commit()
+                return True
+            except sqlite3.Error as e:
+                print(f"[DB] Cleanup error: {e}")
+                return False
+
     def close(self):
         self.conn.close()
 
@@ -533,7 +549,7 @@ class FacebookScraper:
                 self.log(f"⚠️ on_cookies_saved callback error: {e}")
 
     def _load_cookies(self) -> bool:
-        """โหลด session cookies จาก JSON — ปลอดภัยกว่า pickle"""
+        """โหลด session cookies จาก JSON"""
         if not os.path.exists(COOKIES_FILE):
             return False
         try:
@@ -545,12 +561,19 @@ class FacebookScraper:
                 try:
                     self.driver.add_cookie(cookie)
                 except Exception as e:
-                    # [3] log แทน silent pass — แต่ยังคง continue เพราะ cookie เสียบางอันเป็นเรื่องปกติ
                     self.log(f"⚠️ ข้าม cookie ที่ใส่ไม่ได้: {e}")
             self.driver.refresh()
             time.sleep(3)
+            
             if "login" not in self.driver.current_url.lower():
                 self.log("✅ กู้คืน Session เดิมสำเร็จ — ไม่ต้องล็อกอินใหม่")
+                # ======== จุดที่เพิ่ม: สั่งให้ UI ปลดล็อกปุ่มซ่อน Browser ========
+                if self._on_cookies_saved:
+                    try:
+                        self._on_cookies_saved()
+                    except Exception:
+                        pass
+                # ==========================================================
                 return True
         except Exception as e:
             self.log(f"⚠️ โหลด Cookies ไม่สำเร็จ: {e}")
@@ -1029,26 +1052,39 @@ class FacebookScraper:
         hours_back: int,
         loop_minutes: int,
     ):
-        _started_successfully = False  # [3] ติดตาม — send_stopped ยิงเฉพาะเมื่อ start สำเร็จ
+        _started_successfully = False
 
         try:
-            self._start_browser()
-            if not self._load_cookies():
-                self.log("🔑 ไม่มี Session เดิม — เริ่มล็อกอินใหม่")
-                if not self.login(email, password):
-                    self.log("❌ Login ล้มเหลว — หยุดทำงาน (Browser ยังเปิดอยู่)")
-                    self._stop_event.set()
-                    return
-
+            # แจ้งเตือนแค่ครั้งเดียวตอนกดปุ่ม Start
             self.discord.send_start(len(page_urls), len(keywords), loop_minutes)
             self.tg.send_start()
             _started_successfully = True
+            last_cleanup_date = None
 
             while not self._stop_event.is_set():
+                now = datetime.now()
+                
+                # [เผื่อใช้งาน] 🧹 ระบบทำความสะอาดและคืนพื้นที่ตอน 9 โมงเช้า
+                if now.hour >= 9 and last_cleanup_date != now.date():
+                    self.log(f"🧹 ถึงเวลา 09:00 น. | เริ่มล้างข้อมูล Database เก่า...")
+                    if self.db.cleanup_old_data():
+                        self.log("✅ ลบข้อมูลเก่าสำเร็จและคืนพื้นที่แล้ว")
+                    last_cleanup_date = now.date()
+
                 cycle_start = time.time()
                 self.log(f"\n{'='*50}")
-                self.log(f"🔄 เริ่มรอบสแกนใหม่ | {datetime.now().strftime('%d/%m/%Y %H:%M:%S')}")
+                self.log(f"🔄 เริ่มรอบสแกนใหม่ | {now.strftime('%d/%m/%Y %H:%M:%S')}")
 
+                # 1. เปิด Browser สดใหม่ในทุกๆ รอบ
+                self._start_browser()
+                if not self._load_cookies():
+                    self.log("🔑 ไม่มี Session เดิม — เริ่มล็อกอินใหม่")
+                    if not self.login(email, password):
+                        self.log("❌ Login ล้มเหลว — หยุดทำงาน")
+                        self._stop_event.set()
+                        break
+                
+                # 2. เริ่มไล่สแกนเพจ
                 total_new = 0
                 for url in page_urls:
                     if self._stop_event.is_set():
@@ -1060,17 +1096,32 @@ class FacebookScraper:
                     total_new += count
                     self.log(f"📊 เพจ {url.split('/')[-1]}: พบ {count} โพสต์ใหม่")
                     if not self._stop_event.is_set():
-                        # [2] random.uniform แทน time.time() % 3
                         time.sleep(random.uniform(2.0, 5.0))
 
                 if self._stop_event.is_set():
                     break
 
+                # 3. สแกนจบ ส่งแจ้งเตือนสรุปผล
                 duration = time.time() - cycle_start
                 self.log(f"✅ รอบสแกนเสร็จ | พบโพสต์ใหม่รวม: {total_new}")
                 self.discord.send_cycle_complete(duration, loop_minutes)
                 self.tg.send_cycle_complete(duration, loop_minutes)
 
+                # 4. ปิด BROWSER ทิ้งทันทีหลังส่งแจ้งเตือนเสร็จ
+                self.log("🛑 ปิด Browser ชั่วคราวเพื่อประหยัดทรัพยากรระหว่างรอรอบถัดไป...")
+                if self.driver:
+                    try:
+                        # ทริคของ undetected_chromedriver: ต้องสั่งปิดหน้าต่างก่อนสั่ง quit
+                        self.driver.close() 
+                        time.sleep(1) # รอให้หน้าต่างปิดสนิท
+                        self.driver.quit()
+                    except Exception as e:
+                        # เปลี่ยนจาก pass เป็นให้แสดง Error ออกมา จะได้รู้ว่าติดอะไร
+                        self.log(f"⚠️ เกิดข้อผิดพลาดตอนสั่งปิด Browser: {e}")
+                    finally:
+                        self.driver = None
+                        
+                # 5. เข้าสู่โหมดสลีป (นับถอยหลัง)
                 sleep_total = loop_minutes * 60
                 sleep_step  = 5
                 elapsed     = 0
@@ -1084,23 +1135,18 @@ class FacebookScraper:
         except Exception as e:
             self.log(f"❌ Fatal Error ใน Scraper Thread: {e}")
         finally:
-            # [3] send_stopped เฉพาะเมื่อ start สำเร็จ ป้องกัน notify ที่ไม่มีความหมาย
             if _started_successfully:
                 self.discord.send_stopped()
                 self.tg.send_stopped()
 
-            if self._stop_event.is_set():
-                self.log("🛑 Scraper Thread สิ้นสุด — กำลังปิด Browser...")
-                drv = self.driver
-                if drv:
-                    try:
-                        drv.quit()
-                    except Exception as e:
-                        # [3] log แทน silent pass
-                        self.log(f"⚠️ ปิด Browser ไม่สำเร็จ: {e}")
-            else:
-                self.log("🛑 Scraper Thread สิ้นสุด — Browser ยังเปิดอยู่ (ตรวจสอบได้)")
-
+            # ปิด Browser ชัวร์ๆ อีกครั้งถ้าเกิด Error หลุดลูปมา
+            if self.driver:
+                self.log("🛑 สิ้นสุดการทำงาน — กำลังเคลียร์ Browser...")
+                try:
+                    self.driver.quit()
+                except Exception:
+                    pass
+                self.driver = None
     def stop(self):
         self._stop_event.set()
         self._resume_event.set()
@@ -1590,23 +1636,25 @@ class ScraperApp(ctk.CTk):
         )
 
     def _on_hide_browser(self):
-        # [4] อ่าน driver ผ่าน property — thread-safe
         drv = self._scraper.driver if self._scraper else None
         if drv:
             try:
-                drv.minimize_window()
-                self._log("🙈 ซ่อน Browser แล้ว (Minimised)")
+                # โยนหน้าต่างออกไปที่พิกัด X: -2000, Y: -2000 (ออกนอกจอไปเลย)
+                # วิธีนี้ปลอดภัยกว่า Headless Mode ที่เฟสบุ๊คดักจับได้
+                drv.set_window_position(-2000, -2000)
+                self._log("🙈 ซ่อน Browser ไปทำงานเบื้องหลังแล้ว")
                 self.hide_browser_btn.configure(text="👁 แสดง Browser", command=self._on_show_browser)
             except Exception as e:
                 self._log(f"⚠️ ซ่อน Browser ไม่สำเร็จ: {e}")
 
     def _on_show_browser(self):
-        # [4] อ่าน driver ผ่าน property — thread-safe
         drv = self._scraper.driver if self._scraper else None
         if drv:
             try:
+                # ดึงหน้าต่างกลับมาที่พิกัด 0, 0 และขยายเต็มจอ
+                drv.set_window_position(0, 0)
                 drv.maximize_window()
-                self._log("👁 แสดง Browser แล้ว")
+                self._log("👁 แสดง Browser กลับมาแล้ว")
                 self.hide_browser_btn.configure(text="🙈 ซ่อน Browser", command=self._on_hide_browser)
             except Exception as e:
                 self._log(f"⚠️ แสดง Browser ไม่สำเร็จ: {e}")
