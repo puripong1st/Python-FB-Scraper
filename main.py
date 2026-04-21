@@ -1,8 +1,8 @@
 """
-Facebook News Scraper & Discord Notifier
+Facebook News Scraper & Discord/Telegram Notifier
 =========================================
 A desktop automation tool that scrapes Facebook pages for posts matching
-specified keywords and sends Discord webhook notifications.
+specified keywords and sends Discord/Telegram notifications.
 
 Author: Senior Python Developer
 Tech Stack: undetected-chromedriver, CustomTkinter, SQLite3, requests
@@ -39,11 +39,6 @@ import undetected_chromedriver as uc
 # ─────────────────────────────────────────────────────────────────────────────
 
 class DatabaseManager:
-    """
-    Handles all SQLite operations for storing seen Post IDs
-    to prevent duplicate Discord notifications.
-    """
-
     DB_FILE = "scraper_data.db"
 
     def __init__(self):
@@ -52,7 +47,6 @@ class DatabaseManager:
         self._create_tables()
 
     def _create_tables(self):
-        """Create the seen_posts table if it doesn't exist."""
         with self._lock:
             self.conn.execute("""
                 CREATE TABLE IF NOT EXISTS seen_posts (
@@ -65,7 +59,6 @@ class DatabaseManager:
             self.conn.commit()
 
     def is_seen(self, post_id: str) -> bool:
-        """Return True if post_id already exists in the database."""
         with self._lock:
             cur = self.conn.execute(
                 "SELECT 1 FROM seen_posts WHERE post_id = ?", (post_id,)
@@ -73,7 +66,6 @@ class DatabaseManager:
             return cur.fetchone() is not None
 
     def mark_seen(self, post_id: str, page_url: str, post_url: str):
-        """Insert a new post_id into the database."""
         with self._lock:
             try:
                 self.conn.execute(
@@ -82,27 +74,21 @@ class DatabaseManager:
                 )
                 self.conn.commit()
             except sqlite3.Error as e:
-                pass  # Ignore duplicate key errors
+                pass
 
     def close(self):
         self.conn.close()
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# DISCORD NOTIFIER
+# NOTIFIERS (DISCORD & TELEGRAM)
 # ─────────────────────────────────────────────────────────────────────────────
 
 class DiscordNotifier:
-    """
-    Sends formatted webhook messages to a Discord channel.
-    Supports text messages and rich embeds.
-    """
-
     def __init__(self, webhook_url: str):
         self.webhook_url = webhook_url
 
     def _send(self, payload: dict) -> bool:
-        """POST a JSON payload to Discord webhook. Returns True on success."""
         if not self.webhook_url:
             return False
         try:
@@ -117,15 +103,10 @@ class DiscordNotifier:
             return False
 
     def send_start(self):
-        """Notify Discord that the scraper has started."""
-        payload = {
-            "content": f"🟢 **เริ่มระบบ Scraper** | เวลา: `{datetime.now().strftime('%d/%m/%Y %H:%M:%S')}`"
-        }
+        payload = {"content": f"🟢 **เริ่มระบบ Scraper** | เวลา: `{datetime.now().strftime('%d/%m/%Y %H:%M:%S')}`"}
         self._send(payload)
 
-    def send_post(self, page_name: str, page_url: str, post_url: str, content: str, found_keywords: list):
-        """Send a rich embed for a matched Facebook post."""
-        # Discord limits description to 4096 characters
+    def send_post(self, page_name: str, page_url: str, post_url: str, content: str, found_keywords: list, image_url: str = None):
         description = content[:4000] + "\n\n...[อ่านต่อในลิงก์]" if len(content) > 4000 else content
         keywords_str = ", ".join(found_keywords) if found_keywords else "-"
 
@@ -133,50 +114,202 @@ class DiscordNotifier:
             "title": f"📢 ข่าวจาก {page_name}",
             "description": description,
             "url": post_url,
-            "color": 0x1877F2,  # Facebook blue
+            "color": 0x1877F2,
             "fields": [
                 {"name": "🔑 Keywords", "value": keywords_str, "inline": True},
                 {"name": "🌐 เพจ", "value": page_url, "inline": True},
                 {"name": "🔗 Post URL", "value": post_url, "inline": False},
-                {
-                    "name": "🕐 เวลาตรวจพบโพสต์",
-                    "value": datetime.now().strftime("%d/%m/%Y %H:%M:%S"),
-                    "inline": False,
-                },
+                {"name": "🕐 เวลาตรวจพบโพสต์", "value": datetime.now().strftime("%d/%m/%Y %H:%M:%S"), "inline": False},
             ],
             "footer": {"text": "FB News Scraper By PRP"},
         }
-        payload = {"embeds": [embed]}
-        self._send(payload)
+
+        # ✨ [เพิ่มส่วนนี้] ถ้าระบบดึงรูปภาพได้ ให้ใส่รูปเข้าไปใน Embed ด้วย
+        if image_url:
+            embed["image"] = {"url": image_url}
+
+        self._send({"embeds": [embed]})
 
     def send_cycle_complete(self, duration_sec: float, next_run_min: int):
-        """Notify Discord when a full scraping cycle is done."""
         mins = int(duration_sec // 60)
         secs = int(duration_sec % 60)
-        payload = {
-            "content": (
-                f"✅ **สแกนรอบนี้เสร็จสิ้น** | "
-                f"ระยะเวลาที่ใช้: `{mins}m {secs}s` | "
-                f"รอวนลูปทำงานรอบต่อไปในอีก `{next_run_min} นาที`"
-            )
-        }
+        payload = {"content": f"✅ **สแกนรอบนี้เสร็จสิ้น** | ระยะเวลาที่ใช้: `{mins}m {secs}s` | รอวนลูปทำงานรอบต่อไปในอีก `{next_run_min} นาที`"}
         self._send(payload)
 
     def send_obstacle(self, obstacle_type: str):
-        """Alert Discord that manual intervention is needed."""
-        payload = {
-            "content": (
-                f"🚨 @everyone **บอทติดหน้า {obstacle_type}** | "
-                f"กรุณาเข้ามากดแก้ในหน้าต่างเบราว์เซอร์ด่วน! "
-                f"แล้วกดปุ่ม **Resume** บนโปรแกรม"
-            )
-        }
+        payload = {"content": f"🚨 @everyone **บอทติดหน้า {obstacle_type}** | กรุณาเข้ามากดแก้ในหน้าต่างเบราว์เซอร์ด่วน! แล้วกดปุ่ม **Resume** บนโปรแกรม"}
         self._send(payload)
 
     def send_stopped(self):
-        """Notify Discord that the bot was stopped by the user."""
-        payload = {"content": "🔴 **ระบบ Scraper หยุดทำงานแล้ว** (หยุดโดยผู้ใช้)"}
-        self._send(payload)
+        self._send({"content": "🔴 **ระบบ Scraper หยุดทำงานแล้ว** (หยุดโดยผู้ใช้)"})
+
+
+class TelegramNotifier:
+    def __init__(self, bot_token: str, chat_id: str):
+        self.bot_token = bot_token
+        self.chat_id = chat_id
+        self.api_url = f"https://api.telegram.org/bot{bot_token}/sendMessage"
+
+    def _send(self, text: str, keyboard: dict = None) -> bool:
+        if not self.bot_token or not self.chat_id:
+            return False
+        payload = {
+            "chat_id": self.chat_id,
+            "text": text,
+            "parse_mode": "HTML",
+            "disable_web_page_preview": False
+        }
+        if keyboard:
+            payload["reply_markup"] = keyboard
+            
+        try:
+            resp = requests.post(self.api_url, json=payload, timeout=10)
+            return resp.status_code == 200
+        except requests.RequestException:
+            return False
+
+    def send_start(self):
+        self._send(f"🟢 <b>เริ่มระบบ Scraper</b>\nเวลา: {datetime.now().strftime('%d/%m/%Y %H:%M:%S')}")
+
+    # สร้าง _send_photo ขึ้นมาใหม่เพื่อใช้ยิง API รูปภาพ
+    def _send_photo(self, photo_url: str, caption: str, keyboard: dict = None) -> bool:
+        if not self.bot_token or not self.chat_id:
+            return False
+        payload = {
+            "chat_id": self.chat_id,
+            "photo": photo_url,
+            "caption": caption,
+            "parse_mode": "HTML"
+        }
+        if keyboard:
+            payload["reply_markup"] = keyboard
+        try:
+            resp = requests.post(f"https://api.telegram.org/bot{self.bot_token}/sendPhoto", json=payload, timeout=10)
+            return resp.status_code == 200
+        except requests.RequestException:
+            return False
+
+    # แก้ไข send_post ของเดิม
+    def send_post(self, page_name: str, page_url: str, post_url: str, content: str, found_keywords: list, image_url: str = None):
+        kw_str = ", ".join(found_keywords) if found_keywords else "-"
+        
+        # ปุมกดชุดเดิมที่คุณใช้
+        keyboard = {
+            "inline_keyboard": [
+                [
+                    {"text": "💾 บันทึกข่าวนี้", "callback_data": "save_news"},
+                    {"text": "🗑️ ลบข้อความ", "callback_data": "delete_news"}
+                ],
+                [
+                    {"text": "🌐 ดูข้อมูลเพจเพิ่มเติม", "url": page_url}
+                ]
+            ]
+        }
+
+        # ✨ ถ้าระบบดึงรูปภาพได้
+        if image_url:
+            # รูป + แคปชั่น (ถูกจำกัดไม่เกิน 1024 ตัวอักษร ขอตัดที่ 800)
+            snippet = content[:800] + "\n\n...[อ่านต่อในลิงก์]" if len(content) > 800 else content
+            text = (
+                f"📢 <b>ข่าวจาก {page_name}</b>\n\n"
+                f"{snippet}\n\n"
+                f"🔑 <b>Keywords:</b> {kw_str}\n\n"
+                f"🔗 <a href='{post_url}'>เปิดโพสต์ต้นฉบับ</a>"
+            )
+            self._send_photo(image_url, text, keyboard)
+        else:
+            # กรณีโพสต์ไม่มีรูปภาพ
+            snippet = content[:2000] + "\n\n...[อ่านต่อในลิงก์]" if len(content) > 2000 else content
+            text = (
+                f"📢 <b>ข่าวจาก {page_name}</b>\n\n"
+                f"{snippet}\n\n"
+                f"🔑 <b>Keywords:</b> {kw_str}\n\n"
+                f"🔗 <a href='{post_url}'>เปิดโพสต์ต้นฉบับ</a>"
+            )
+            self._send(text, keyboard)
+
+    def send_cycle_complete(self, duration_sec: float, next_run_min: int):
+        mins = int(duration_sec // 60)
+        secs = int(duration_sec % 60)
+        self._send(f"✅ <b>สแกนรอบนี้เสร็จสิ้น</b>\nระยะเวลาที่ใช้: {mins}m {secs}s\nรอทำงานรอบต่อไปในอีก {next_run_min} นาที")
+
+    def send_obstacle(self, obstacle_type: str):
+        self._send(f"🚨 <b>บอทติดหน้า {obstacle_type}</b>\nกรุณาเข้ามากดแก้ในเบราว์เซอร์ด่วน!\nแล้วกดปุ่ม <b>Resume</b> บนโปรแกรม")
+
+    def send_stopped(self):
+        self._send("🔴 <b>ระบบ Scraper หยุดทำงานแล้ว</b> (หยุดโดยผู้ใช้)")
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# TELEGRAM LISTENER (คอยดักจับการกดปุ่ม)
+# ─────────────────────────────────────────────────────────────────────────────
+class TelegramListener(threading.Thread):
+    def __init__(self, bot_token: str):
+        super().__init__(daemon=True)
+        self.bot_token = bot_token
+        self.api_url = f"https://api.telegram.org/bot{bot_token}/"
+        self.offset = None
+        self._stop_event = threading.Event()
+
+    def run(self):
+        if not self.bot_token:
+            return
+        while not self._stop_event.is_set():
+            try:
+                # ใช้ Long Polling รอดัก Event
+                payload = {"timeout": 20}
+                if self.offset:
+                    payload["offset"] = self.offset
+                
+                resp = requests.post(self.api_url + "getUpdates", json=payload, timeout=25)
+                if resp.status_code == 200:
+                    data = resp.json()
+                    if data.get("ok"):
+                        for result in data["result"]:
+                            self.offset = result["update_id"] + 1
+                            if "callback_query" in result:
+                                self._handle_callback(result["callback_query"])
+            except Exception:
+                time.sleep(3)
+
+    def _handle_callback(self, cb: dict):
+        cb_id = cb.get("id")
+        data = cb.get("data")
+        msg = cb.get("message", {})
+        chat_id = msg.get("chat", {}).get("id")
+        msg_id = msg.get("message_id")
+
+        if not chat_id or not msg_id:
+            return
+
+        if data == "save_news":
+            # เปลี่ยนปุ่มเป็น "บันทึกแล้ว" และซ่อนปุ่มลบ เพื่อเปลี่ยนสถานะให้ชัดเจน
+            new_keyboard = {
+                "inline_keyboard": [
+                    [{"text": "✅ บันทึกข่าวเรียบร้อยแล้ว", "callback_data": "already_saved"}]
+                ]
+            }
+            requests.post(self.api_url + "editMessageReplyMarkup", json={
+                "chat_id": chat_id,
+                "message_id": msg_id,
+                "reply_markup": new_keyboard
+            })
+            requests.post(self.api_url + "answerCallbackQuery", json={"callback_query_id": cb_id, "text": "อัปเดตสถานะการบันทึกแล้ว!"})
+
+        elif data == "delete_news":
+            # ลบข้อความทิ้งไปเลย
+            requests.post(self.api_url + "deleteMessage", json={
+                "chat_id": chat_id,
+                "message_id": msg_id
+            })
+            requests.post(self.api_url + "answerCallbackQuery", json={"callback_query_id": cb_id, "text": "ลบข่าวนี้ออกจากแชทแล้ว"})
+            
+        elif data == "already_saved":
+            # กรณีผู้ใช้มากดปุ่มซ้ำ
+            requests.post(self.api_url + "answerCallbackQuery", json={"callback_query_id": cb_id, "text": "ข่าวนี้ถูกบันทึกไปแล้วครับ!"})
+
+    def stop(self):
+        self._stop_event.set()
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -185,13 +318,7 @@ class DiscordNotifier:
 
 COOKIES_FILE = "fb_cookies.pkl"
 
-
 class FacebookScraper:
-    """
-    Core scraping engine. Uses undetected-chromedriver to bypass Facebook's
-    bot detection. Handles login, obstacle detection, and post extraction.
-    """
-
     SELECTORS = {
         "email_input": "//input[@id='email' or @name='email']",
         "pass_input": "//input[@id='pass' or @name='pass']",
@@ -202,11 +329,11 @@ class FacebookScraper:
 
     HOME_URL = "https://www.facebook.com"
 
-    def __init__(self, log_callback, db: DatabaseManager, discord: DiscordNotifier,
-                 on_cookies_saved=None):
+    def __init__(self, log_callback, db: DatabaseManager, discord: DiscordNotifier, tg: TelegramNotifier, on_cookies_saved=None):
         self.log = log_callback        
         self.db = db
         self.discord = discord
+        self.tg = tg
         self.driver = None
         self._on_cookies_saved = on_cookies_saved  
 
@@ -214,8 +341,6 @@ class FacebookScraper:
         self._resume_event = threading.Event()
         self._resume_event.set()  
         self._is_paused = False
-
-    # ── Browser ──────────────────────────────────────────────────────────────
 
     def _start_browser(self):
         options = uc.ChromeOptions()
@@ -261,8 +386,6 @@ class FacebookScraper:
             self.log(f"⚠️ โหลด Cookies ไม่สำเร็จ: {e}")
         return False
 
-    # ── Login ─────────────────────────────────────────────────────────────────
-
     def _type_human(self, element, text: str, delay: float = 0.06):
         element.clear()
         time.sleep(0.3)
@@ -283,9 +406,7 @@ class FacebookScraper:
 
         for by, selector in strategies:
             try:
-                btn = WebDriverWait(self.driver, 4).until(
-                    EC.element_to_be_clickable((by, selector))
-                )
+                btn = WebDriverWait(self.driver, 4).until(EC.element_to_be_clickable((by, selector)))
                 self.driver.execute_script("arguments[0].scrollIntoView(true);", btn)
                 time.sleep(0.3)
                 btn.click()
@@ -301,7 +422,6 @@ class FacebookScraper:
             return True
         except Exception:
             pass
-
         return False
 
     def login(self, email: str, password: str) -> bool:
@@ -310,16 +430,12 @@ class FacebookScraper:
             wait = WebDriverWait(self.driver, 20)
 
             self.log("📧 กำลังกรอก Email...")
-            email_field = wait.until(
-                EC.element_to_be_clickable((By.XPATH, self.SELECTORS["email_input"]))
-            )
+            email_field = wait.until(EC.element_to_be_clickable((By.XPATH, self.SELECTORS["email_input"])))
             self._type_human(email_field, email, delay=0.06)
             time.sleep(0.4)
 
             self.log("🔑 กำลังกรอก Password...")
-            pass_field = WebDriverWait(self.driver, 10).until(
-                EC.element_to_be_clickable((By.XPATH, self.SELECTORS["pass_input"]))
-            )
+            pass_field = WebDriverWait(self.driver, 10).until(EC.element_to_be_clickable((By.XPATH, self.SELECTORS["pass_input"])))
             self._type_human(pass_field, password, delay=0.05)
             time.sleep(0.6)
 
@@ -371,22 +487,15 @@ class FacebookScraper:
             self.log(f"❌ Login Error: {e}")
             return False
 
-    # ── Obstacle Detection ────────────────────────────────────────────────────
-
     def _detect_obstacle(self) -> str | None:
         url = self.driver.current_url.lower()
         title = self.driver.title.lower()
 
-        if "checkpoint" in url or "checkpoint" in title:
-            return "Checkpoint"
-        if "two_step_verification" in url or "two_factor" in url:
-            return "2FA (Two-Factor Authentication)"
-        if "captcha" in url or "captcha" in title:
-            return "CAPTCHA"
-        if "login_attempt" in url:
-            return "Login Attempt Blocked"
-        if "suspended" in url or "disabled" in url:
-            return "Account Suspended/Disabled"
+        if "checkpoint" in url or "checkpoint" in title: return "Checkpoint"
+        if "two_step_verification" in url or "two_factor" in url: return "2FA (Two-Factor Authentication)"
+        if "captcha" in url or "captcha" in title: return "CAPTCHA"
+        if "login_attempt" in url: return "Login Attempt Blocked"
+        if "suspended" in url or "disabled" in url: return "Account Suspended/Disabled"
 
         try:
             body_text = self.driver.find_element(By.TAG_NAME, "body").text.lower()
@@ -394,12 +503,12 @@ class FacebookScraper:
                 return "Identity Verification"
         except Exception:
             pass
-
         return None
 
     def _handle_obstacle(self, obstacle_type: str):
         self.log(f"🚨 ติด {obstacle_type} — หยุดรอผู้ใช้แก้ไข กด Resume เมื่อเสร็จ")
         self.discord.send_obstacle(obstacle_type)
+        self.tg.send_obstacle(obstacle_type)
         self._resume_event.clear()  
         self._is_paused = True
         self._resume_event.wait()
@@ -409,124 +518,73 @@ class FacebookScraper:
     def resume(self):
         self._resume_event.set()
 
-    # ── Scraping ──────────────────────────────────────────────────────────────
-
     def _slow_scroll(self, scrolls: int = 5, pause: float = 1.8):
         for _ in range(scrolls):
-            if self._stop_event.is_set():
-                break
+            if self._stop_event.is_set(): break
             self.driver.execute_script("window.scrollBy(0, window.innerHeight * 0.8);")
             time.sleep(pause + (time.time() % 0.5))
 
     def _extract_post_id(self, url: str) -> str | None:
         patterns = [
-            r"/posts/(\d+)",
-            r"/videos/(\d+)",
-            r"story_fbid=(\d+)",
-            r"/permalink/(\d+)",
-            r"fbid=(\d+)",
+            r"/posts/(\d+)", r"/videos/(\d+)", r"story_fbid=(\d+)", r"/permalink/(\d+)", r"fbid=(\d+)",
         ]
         for pattern in patterns:
             m = re.search(pattern, url)
-            if m:
-                return m.group(1)
+            if m: return m.group(1)
         return str(hash(url))
 
     def _parse_post_timestamp(self, driver, article_element) -> datetime | None:
-        """
-        [VER 3.0: อ่านเวลาแบบรัดกุม 100%]
-        อ่านจากข้อความภาษาไทย/อังกฤษที่ตาคนเห็นบนหน้าจอ 
-        รับมือการซ่อน Timestamp ของ Facebook ได้อย่างเด็ดขาด
-        """
         now = datetime.now()
-        
-        # 1. ลองอ่านจาก Text 10 บรรทัดแรกของโพสต์
         try:
             lines = article_element.text.split('\n')[:10]
             for line in lines:
                 text = line.lower().strip()
-                # ลบจุดไข่ปลา หรือคอมม่าที่ชอบติดมากับเวลาออก
                 text = text.replace('·', '').replace(',', '').strip()
+                if not text: continue
                 
-                if not text:
-                    continue
+                if "เพิ่ง" in text or "เมื่อสักครู่" in text or "just now" in text: return now
+                if "เมื่อวาน" in text or "yesterday" in text: return now - timedelta(days=1)
                 
-                # เช็คคำเฉพาะ
-                if "เพิ่ง" in text or "เมื่อสักครู่" in text or "just now" in text:
-                    return now
-                if "เมื่อวาน" in text or "yesterday" in text:
-                    return now - timedelta(days=1)
-                
-                # เช็ค format: ตัวเลข ตามด้วย หน่วยเวลา (เช่น 15 ชม., 2 hrs)
                 match = re.search(r'(\d+)\s*(นาที|ชั่วโมง|ชม|วัน|สัปดาห์|เดือน|ปี|mins?|m\b|hrs?|h\b|days?|d\b|weeks?|w\b|months?|years?)', text)
                 if match:
                     num = int(match.group(1))
                     unit = match.group(2)
-                    
-                    if "นาที" in unit or "min" in unit or unit == "m":
-                        return now - timedelta(minutes=num)
-                    elif "ชม" in unit or "ชั่วโมง" in unit or "hr" in unit or unit == "h":
-                        return now - timedelta(hours=num)
-                    elif "วัน" in unit or "day" in unit or unit == "d":
-                        return now - timedelta(days=num)
-                    elif "สัปดาห์" in unit or "week" in unit or unit == "w":
-                        return now - timedelta(weeks=num)
-                    elif "เดือน" in unit or "month" in unit:
-                        return now - timedelta(days=num * 30)
-                    elif "ปี" in unit or "year" in unit:
-                        return now - timedelta(days=num * 365)
+                    if "นาที" in unit or "min" in unit or unit == "m": return now - timedelta(minutes=num)
+                    elif "ชม" in unit or "ชั่วโมง" in unit or "hr" in unit or unit == "h": return now - timedelta(hours=num)
+                    elif "วัน" in unit or "day" in unit or unit == "d": return now - timedelta(days=num)
+                    elif "สัปดาห์" in unit or "week" in unit or unit == "w": return now - timedelta(weeks=num)
+                    elif "เดือน" in unit or "month" in unit: return now - timedelta(days=num * 30)
+                    elif "ปี" in unit or "year" in unit: return now - timedelta(days=num * 365)
                 
-                # เช็ค format วันที่ (เช่น 22 เมษายน, 15 มี.ค.)
-                thai_months = [
-                    "ม.ค.", "ก.พ.", "มี.ค.", "เม.ย.", "พ.ค.", "มิ.ย.", "ก.ค.", "ส.ค.", "ก.ย.", "ต.ค.", "พ.ย.", "ธ.ค.", 
-                    "มกราคม", "กุมภาพันธ์", "มีนาคม", "เมษายน", "พฤษภาคม", "มิถุนายน", "กรกฎาคม", "สิงหาคม", "กันยายน", "ตุลาคม", "พฤศจิกายน", "ธันวาคม",
-                    "january", "february", "march", "april", "may", "june", "july", "august", "september", "october", "november", "december",
-                    "jan ", "feb ", "mar ", "apr ", "jun ", "jul ", "aug ", "sep ", "oct ", "nov ", "dec "
-                ]
-                # ถ้าบรรทัดนั้นมีชื่อเดือนและตัวเลข แปลว่าเป็นวันที่เก่ากว่า 24 ชม แน่นอน
+                thai_months = ["ม.ค.", "ก.พ.", "มี.ค.", "เม.ย.", "พ.ค.", "มิ.ย.", "ก.ค.", "ส.ค.", "ก.ย.", "ต.ค.", "พ.ย.", "ธ.ค.", 
+                               "มกราคม", "กุมภาพันธ์", "มีนาคม", "เมษายน", "พฤษภาคม", "มิถุนายน", "กรกฎาคม", "สิงหาคม", "กันยายน", "ตุลาคม", "พฤศจิกายน", "ธันวาคม"]
                 if any(m in text for m in thai_months) and re.search(r'\d+', text):
                     return now - timedelta(days=2) 
-
         except Exception:
             pass
 
-        # 2. Fallback วิธีเดิม ดึงจาก attribute HTML (กรณีแบบแรกพลาด)
         try:
-            time_elements = article_element.find_elements(
-                By.XPATH, ".//abbr[@data-utime] | .//a[contains(@aria-label, '20')]"
-            )
+            time_elements = article_element.find_elements(By.XPATH, ".//abbr[@data-utime] | .//a[contains(@aria-label, '20')]")
             for el in time_elements:
                 utime = el.get_attribute("data-utime")
-                if utime:
-                    return datetime.fromtimestamp(int(utime))
+                if utime: return datetime.fromtimestamp(int(utime))
                 aria = el.get_attribute("aria-label") or ""
                 if aria:
                     for fmt in ["%d %B %Y เวลา %H:%M น.", "%B %d, %Y at %I:%M %p", "%B %d %Y"]:
-                        try:
-                            return datetime.strptime(aria, fmt)
-                        except ValueError:
-                            pass
+                        try: return datetime.strptime(aria, fmt)
+                        except ValueError: pass
         except (NoSuchElementException, StaleElementReferenceException):
             pass
-            
         return None
 
     def _get_articles(self) -> list:
-        try:
-            return self.driver.find_elements(By.XPATH, "//div[@role='article']")
-        except Exception:
-            return []
+        try: return self.driver.find_elements(By.XPATH, "//div[@role='article']")
+        except Exception: return []
 
-    def scrape_page(
-        self,
-        page_url: str,
-        keywords: list[str],
-        hours_back: int,
-    ) -> int:
+    def scrape_page(self, page_url: str, keywords: list[str], hours_back: int) -> int:
         new_posts = 0
         page_name = page_url.rstrip("/").split("/")[-1]
         cutoff_time = datetime.now() - timedelta(hours=hours_back)
-
         MAX_CONSECUTIVE_OLD = 5
         consecutive_old = 0
         seen_this_run: set = set()
@@ -539,8 +597,7 @@ class FacebookScraper:
             obstacle = self._detect_obstacle()
             if obstacle:
                 self._handle_obstacle(obstacle)
-                if self._stop_event.is_set():
-                    return 0
+                if self._stop_event.is_set(): return 0
 
             scroll_rounds = 0
             MAX_SCROLL_ROUNDS = 20
@@ -548,35 +605,22 @@ class FacebookScraper:
             while not self._stop_event.is_set() and scroll_rounds < MAX_SCROLL_ROUNDS:
                 self._slow_scroll(scrolls=3, pause=1.8)
                 scroll_rounds += 1
-
                 articles = self._get_articles()
                 if not articles:
                     self.log(f"⚠️ ไม่พบ article elements บนเพจ {page_name}")
                     break
 
                 new_in_this_round = False
-
                 for article in articles:
-                    if self._stop_event.is_set():
-                        break
-
+                    if self._stop_event.is_set(): break
                     self._resume_event.wait()
 
                     try:
-                        # ── Extract post URL ──────────────────────────────────
                         post_url = ""
                         try:
-                            link_els = article.find_elements(
-                                By.XPATH,
-                                ".//a[contains(@href, '/posts/') or "
-                                "contains(@href, '/videos/') or "
-                                "contains(@href, 'story_fbid') or "
-                                "contains(@href, '/permalink/')]"
-                            )
-                            if link_els:
-                                post_url = link_els[0].get_attribute("href") or ""
-                        except (NoSuchElementException, StaleElementReferenceException):
-                            pass
+                            link_els = article.find_elements(By.XPATH, ".//a[contains(@href, '/posts/') or contains(@href, '/videos/') or contains(@href, 'story_fbid') or contains(@href, '/permalink/')]")
+                            if link_els: post_url = link_els[0].get_attribute("href") or ""
+                        except (NoSuchElementException, StaleElementReferenceException): pass
 
                         if not post_url:
                             try:
@@ -584,102 +628,83 @@ class FacebookScraper:
                                 for a in anchors:
                                     href = a.get_attribute("href") or ""
                                     if page_name.lower() in href.lower() and len(href) > 30:
-                                        post_url = href
-                                        break
-                            except Exception:
-                                pass
+                                        post_url = href; break
+                            except Exception: pass
 
-                        if not post_url:
-                            continue
-
+                        if not post_url: continue
                         post_url_clean = post_url.split("?")[0].rstrip("/")
 
-                        if post_url_clean in seen_this_run:
-                            continue
+                        if post_url_clean in seen_this_run: continue
                         seen_this_run.add(post_url_clean)
                         new_in_this_round = True
 
-                        # ── Extract Post ID ───────────────────────────────────
                         post_id = self._extract_post_id(post_url)
-                        if not post_id:
-                            continue
+                        if not post_id or self.db.is_seen(post_id): continue
 
-                        # ── Deduplication (DB) ────────────────────────────────
-                        if self.db.is_seen(post_id):
-                            continue
-
-                        # ── Timestamp check (แก้ไขใหม่) ────────────────────────
                         post_time = self._parse_post_timestamp(self.driver, article)
                         if post_time is not None:
                             if post_time < cutoff_time:
                                 consecutive_old += 1
-                                self.log(
-                                    f"⏩ ข้ามโพสต์เก่า ({consecutive_old}/{MAX_CONSECUTIVE_OLD}) | พบเวลา: {post_time.strftime('%d/%m %H:%M')}"
-                                )
+                                self.log(f"⏩ ข้ามโพสต์เก่า ({consecutive_old}/{MAX_CONSECUTIVE_OLD}) | พบเวลา: {post_time.strftime('%d/%m %H:%M')}")
                                 if consecutive_old >= MAX_CONSECUTIVE_OLD:
-                                    self.log(
-                                        f"🏁 เจอโพสต์เก่าเลยกำหนด ติดต่อกัน {MAX_CONSECUTIVE_OLD} รายการ "
-                                        f"— หยุดสแกนเพจนี้"
-                                    )
+                                    self.log(f"🏁 เจอโพสต์เก่าเลยกำหนด ติดต่อกัน {MAX_CONSECUTIVE_OLD} รายการ — หยุดสแกนเพจนี้")
                                     return new_posts
                                 continue
                             else:
-                                consecutive_old = 0  # ถ้าเป็นโพสต์ใหม่ ให้รีเซ็ตค่ากลับเป็น 0
+                                consecutive_old = 0
                         else:
-                            # ป้องกัน Loop ค้าง กรณีอ่านเวลาไม่ได้ ให้ถือเป็นโพสต์ใหม่ไปก่อน แต่ไม่ Reset consecutive_old
                             self.log(f"⚠️ อ่านเวลาไม่ออก... กำลังตรวจสอบ Keywords ต่อไป")
                             
-                        # ── Click "See More" (ดูเพิ่มเติม) ──────────────────────
                         try:
-                            more_btns = article.find_elements(
-                                By.XPATH, 
-                                ".//div[@role='button' and (contains(., 'ดูเพิ่มเติม') or contains(., 'See more'))]"
-                            )
+                            more_btns = article.find_elements(By.XPATH, ".//div[@role='button' and (contains(., 'ดูเพิ่มเติม') or contains(., 'See more'))]")
                             for btn in more_btns:
                                 if btn.is_displayed():
                                     self.driver.execute_script("arguments[0].click();", btn)
                                     time.sleep(0.5)
+                        except Exception: pass
+
+                        post_text = ""
+                        try:
+                            text_containers = article.find_elements(By.XPATH, ".//div[@data-ad-comet-preview='message'] | .//div[@data-testid='post_message']")
+                            if text_containers: post_text = text_containers[0].text.strip()
+                            if not post_text: continue 
+                        except StaleElementReferenceException: continue
+                        image_url = None
+                        try:
+                            # หาภาพที่มี src เป็น scontent (รูปภาพหลักที่ Facebook นิยมใช้)
+                            imgs = article.find_elements(By.XPATH, ".//img[contains(@src, 'scontent')]")
+                            for img in imgs:
+                                src = img.get_attribute("src")
+                                if src and "emoji" not in src:
+                                    try:
+                                        # ข้ามรูปโปรไฟล์หรือไอคอนที่มีขนาดเล็ก
+                                        w = img.get_attribute("width")
+                                        if w and int(w) <= 100:
+                                            continue
+                                    except:
+                                        pass
+                                    image_url = src
+                                    break
                         except Exception:
                             pass
 
-                        # ── Extract text (ป้องกันการจับคอมเมนต์ 100%) ─────────────────
-                        post_text = ""
-                        try:
-                            # เล็งเฉพาะ tag ที่ Facebook ใช้เก็บเนื้อหาโพสต์จริงๆ (เท่านั้น)
-                            text_containers = article.find_elements(
-                                By.XPATH,
-                                ".//div[@data-ad-comet-preview='message'] | "
-                                ".//div[@data-testid='post_message']"
-                            )
-                            
-                            if text_containers:
-                                # เอาแค่อันแรกสุดที่เจอ ซึ่งจะเป็นตัวเนื้อหาข่าวหลักเสมอ
-                                post_text = text_containers[0].text.strip()
-                                
-                            if not post_text:
-                                continue 
-                        except StaleElementReferenceException:
-                            continue
-
-                        # ── Keyword filter ────────────────────────────────────
                         found_keywords = []
                         if keywords:
                             for kw in keywords:
-                                if kw.lower().strip() in post_text.lower():
-                                    found_keywords.append(kw.strip())
-                            
-                            if not found_keywords:
-                                continue
+                                if kw.lower().strip() in post_text.lower(): found_keywords.append(kw.strip())
+                            if not found_keywords: continue
 
-                        # ── Send & record ─────────────────────────────────────
                         self.log(f"✅ โพสต์ตรงเงื่อนไข: {post_url_clean[:70]}")
-                        self.discord.send_post(page_name, page_url, post_url_clean, post_text, found_keywords)
+                        
+                        # ── Send Notifications ─────────────────────────────────────
+                        self.discord.send_post(page_name, page_url, post_url_clean, post_text, found_keywords, image_url)
+                        self.tg.send_post(page_name, page_url, post_url_clean, post_text, found_keywords, image_url)
+                        
                         self.db.mark_seen(post_id, page_url, post_url_clean)
                         new_posts += 1
                         time.sleep(0.5)
 
-                    except StaleElementReferenceException:
-                        continue
+                    except StaleElementReferenceException: continue
                     except Exception as e:
                         self.log(f"⚠️ ข้ามโพสต์ที่อ่านไม่ได้: {type(e).__name__}")
                         continue
@@ -688,32 +713,15 @@ class FacebookScraper:
                     self.log(f"📄 ไม่มีโพสต์ใหม่ให้โหลดแล้วบนเพจ {page_name} — จบการสแกน")
                     break
 
-            self.log(
-                f"📊 สแกนเพจ {page_name} เสร็จ | "
-                f"Scroll {scroll_rounds} รอบ | โพสต์ใหม่: {new_posts}"
-            )
+            self.log(f"📊 สแกนเพจ {page_name} เสร็จ | Scroll {scroll_rounds} รอบ | โพสต์ใหม่: {new_posts}")
 
-        except WebDriverException as e:
-            self.log(f"❌ WebDriver Error ที่เพจ {page_name}: {e}")
-        except Exception as e:
-            self.log(f"❌ Error scraping {page_name}: {e}")
-
+        except WebDriverException as e: self.log(f"❌ WebDriver Error ที่เพจ {page_name}: {e}")
+        except Exception as e: self.log(f"❌ Error scraping {page_name}: {e}")
         return new_posts
 
-    # ── Main Run Loop ─────────────────────────────────────────────────────────
-
-    def run(
-        self,
-        email: str,
-        password: str,
-        page_urls: list[str],
-        keywords: list[str],
-        hours_back: int,
-        loop_minutes: int,
-    ):
+    def run(self, email: str, password: str, page_urls: list[str], keywords: list[str], hours_back: int, loop_minutes: int):
         try:
             self._start_browser()
-
             if not self._load_cookies():
                 self.log("🔑 ไม่มี Session เดิม — เริ่มล็อกอินใหม่")
                 if not self.login(email, password):
@@ -722,6 +730,7 @@ class FacebookScraper:
                     return
 
             self.discord.send_start()
+            self.tg.send_start()
 
             while not self._stop_event.is_set():
                 cycle_start = time.time()
@@ -730,23 +739,21 @@ class FacebookScraper:
 
                 total_new = 0
                 for url in page_urls:
-                    if self._stop_event.is_set():
-                        break
+                    if self._stop_event.is_set(): break
                     url = url.strip()
-                    if not url:
-                        continue
+                    if not url: continue
                     count = self.scrape_page(url, keywords, hours_back)
                     total_new += count
                     self.log(f"📊 เพจ {url.split('/')[-1]}: พบ {count} โพสต์ใหม่")
-                    if not self._stop_event.is_set():
-                        time.sleep(2 + (time.time() % 3))
+                    if not self._stop_event.is_set(): time.sleep(2 + (time.time() % 3))
 
-                if self._stop_event.is_set():
-                    break
+                if self._stop_event.is_set(): break
 
                 duration = time.time() - cycle_start
                 self.log(f"✅ รอบสแกนเสร็จ | พบโพสต์ใหม่รวม: {total_new}")
+                
                 self.discord.send_cycle_complete(duration, loop_minutes)
+                self.tg.send_cycle_complete(duration, loop_minutes)
 
                 sleep_total = loop_minutes * 60
                 sleep_step = 5  
@@ -762,13 +769,12 @@ class FacebookScraper:
             self.log(f"❌ Fatal Error ใน Scraper Thread: {e}")
         finally:
             self.discord.send_stopped()
+            self.tg.send_stopped()
             if self._stop_event.is_set():
                 self.log("🛑 Scraper Thread สิ้นสุด — กำลังปิด Browser...")
                 try:
-                    if self.driver:
-                        self.driver.quit()
-                except Exception:
-                    pass
+                    if self.driver: self.driver.quit()
+                except Exception: pass
             else:
                 self.log("🛑 Scraper Thread สิ้นสุด — Browser ยังเปิดอยู่ (ตรวจสอบได้)")
 
@@ -777,141 +783,80 @@ class FacebookScraper:
         self._resume_event.set()  
 
 
-
 # ─────────────────────────────────────────────────────────────────────────────
 # KEYWORD TAG INPUT WIDGET
 # ─────────────────────────────────────────────────────────────────────────────
 
 class KeywordTagInput(ctk.CTkFrame):
-    CHIP_BG      = "#1e3a5f"   
-    CHIP_FG      = "#7ec8f0"   
-    CHIP_BTN_FG  = "#5ba4cf"
-    CHIP_HOVER   = "#2a4f7a"
+    CHIP_BG = "#1e3a5f"   
+    CHIP_FG = "#7ec8f0"   
+    CHIP_BTN_FG = "#5ba4cf"
+    CHIP_HOVER = "#2a4f7a"
 
     def __init__(self, master, defaults: list | None = None, **kwargs):
         super().__init__(master, **kwargs)
         self._tags: list[str] = []
         self._chip_widgets: dict[str, ctk.CTkFrame] = {}   
-
         self._build()
-        for kw in (defaults or []):
-            self._add_tag(kw)
+        for kw in (defaults or []): self._add_tag(kw)
 
     def _build(self):
         import tkinter as tk
-
         self.grid_columnconfigure(0, weight=1)
 
         chip_outer = ctk.CTkFrame(self, fg_color=("gray85", "#1a1a2e"), corner_radius=8)
         chip_outer.grid(row=0, column=0, sticky="ew", padx=8, pady=(6, 2))
         chip_outer.grid_columnconfigure(0, weight=1)
 
-        self._canvas = tk.Canvas(
-            chip_outer,
-            bg="#1a1a2e", bd=0, highlightthickness=0,
-            height=46,
-        )
+        self._canvas = tk.Canvas(chip_outer, bg="#1a1a2e", bd=0, highlightthickness=0, height=46)
         self._canvas.pack(fill="x", expand=True, padx=4, pady=(4, 0))
 
-        self._hbar = tk.Scrollbar(
-            chip_outer, orient="horizontal",
-            command=self._canvas.xview,
-        )
+        self._hbar = tk.Scrollbar(chip_outer, orient="horizontal", command=self._canvas.xview)
         self._hbar.pack(fill="x", padx=4, pady=(0, 4))
         self._canvas.configure(xscrollcommand=self._hbar.set)
 
         self._chip_area = tk.Frame(self._canvas, bg="#1a1a2e")
-        self._canvas_window = self._canvas.create_window(
-            (0, 0), window=self._chip_area, anchor="nw"
-        )
+        self._canvas_window = self._canvas.create_window((0, 0), window=self._chip_area, anchor="nw")
 
-        self._chip_area.bind(
-            "<Configure>",
-            lambda e: self._canvas.configure(
-                scrollregion=self._canvas.bbox("all")
-            )
-        )
-        self._canvas.bind("<MouseWheel>",
-            lambda e: self._canvas.xview_scroll(int(-e.delta / 60), "units"))
-        self._canvas.bind("<Button-4>",
-            lambda e: self._canvas.xview_scroll(-1, "units"))
-        self._canvas.bind("<Button-5>",
-            lambda e: self._canvas.xview_scroll(1, "units"))
-
+        self._chip_area.bind("<Configure>", lambda e: self._canvas.configure(scrollregion=self._canvas.bbox("all")))
+        self._canvas.bind("<MouseWheel>", lambda e: self._canvas.xview_scroll(int(-e.delta / 60), "units"))
+        
         input_row = ctk.CTkFrame(self, fg_color="transparent")
         input_row.grid(row=1, column=0, sticky="ew", padx=8, pady=(2, 6))
         input_row.grid_columnconfigure(0, weight=1)
 
         self._entry_var = ctk.StringVar()
-        self._entry = ctk.CTkEntry(
-            input_row,
-            textvariable=self._entry_var,
-            placeholder_text="พิมพ์ keyword แล้วกด Enter หรือ ＋",
-            height=34,
-        )
+        self._entry = ctk.CTkEntry(input_row, textvariable=self._entry_var, placeholder_text="พิมพ์ keyword แล้วกด Enter หรือ ＋", height=34)
         self._entry.grid(row=0, column=0, sticky="ew", padx=(0, 6))
         self._entry.bind("<Return>", lambda e: self._on_add())
 
-        add_btn = ctk.CTkButton(
-            input_row,
-            text="＋ เพิ่ม",
-            width=80, height=34,
-            fg_color="#1877F2", hover_color="#145db8",
-            command=self._on_add,
-        )
+        add_btn = ctk.CTkButton(input_row, text="＋ เพิ่ม", width=80, height=34, fg_color="#1877F2", hover_color="#145db8", command=self._on_add)
         add_btn.grid(row=0, column=1)
 
-        clear_btn = ctk.CTkButton(
-            input_row,
-            text="ล้างทั้งหมด",
-            width=90, height=34,
-            fg_color="gray30", hover_color="gray20",
-            command=self._clear_all,
-        )
+        clear_btn = ctk.CTkButton(input_row, text="ล้างทั้งหมด", width=90, height=34, fg_color="gray30", hover_color="gray20", command=self._clear_all)
         clear_btn.grid(row=0, column=2, padx=(6, 0))
 
     def _on_add(self):
         raw = self._entry_var.get().strip()
-        if not raw:
-            return
+        if not raw: return
         parts = [p.strip() for p in raw.split(",") if p.strip()]
-        for p in parts:
-            self._add_tag(p)
+        for p in parts: self._add_tag(p)
         self._entry_var.set("")
 
     def _add_tag(self, text: str):
-        if not text or text in self._tags:
-            return
+        if not text or text in self._tags: return
         self._tags.append(text)
         self._render_chip(text)
 
     def _render_chip(self, text: str):
         import tkinter as tk
-
-        chip = tk.Frame(
-            self._chip_area,
-            bg=self.CHIP_BG,
-            bd=0,
-            padx=6, pady=3,
-        )
+        chip = tk.Frame(self._chip_area, bg=self.CHIP_BG, bd=0, padx=6, pady=3)
         chip.pack(side="left", padx=3, pady=3)
-
-        lbl = tk.Label(
-            chip, text=text,
-            bg=self.CHIP_BG, fg=self.CHIP_FG,
-            font=("Segoe UI", 10),
-        )
+        lbl = tk.Label(chip, text=text, bg=self.CHIP_BG, fg=self.CHIP_FG, font=("Segoe UI", 10))
         lbl.pack(side="left")
 
-        def remove():
-            self._remove_tag(text, chip)
-
-        btn = tk.Label(
-            chip, text=" ✕",
-            bg=self.CHIP_BG, fg=self.CHIP_BTN_FG,
-            font=("Segoe UI", 10, "bold"),
-            cursor="hand2",
-        )
+        def remove(): self._remove_tag(text, chip)
+        btn = tk.Label(chip, text=" ✕", bg=self.CHIP_BG, fg=self.CHIP_BTN_FG, font=("Segoe UI", 10, "bold"), cursor="hand2")
         btn.pack(side="left")
         btn.bind("<Button-1>", lambda e: remove())
         btn.bind("<Enter>", lambda e: btn.config(fg="#ff6b6b"))
@@ -923,24 +868,19 @@ class KeywordTagInput(ctk.CTkFrame):
         self._canvas.xview_moveto(1.0)
 
     def _remove_tag(self, text: str, chip_frame):
-        if text in self._tags:
-            self._tags.remove(text)
+        if text in self._tags: self._tags.remove(text)
         chip_frame.destroy()
         self._chip_widgets.pop(text, None)
 
     def _clear_all(self):
-        for chip in list(self._chip_widgets.values()):
-            chip.destroy()
+        for chip in list(self._chip_widgets.values()): chip.destroy()
         self._chip_widgets.clear()
         self._tags.clear()
 
-    def get_keywords(self) -> list:
-        return list(self._tags)
-
+    def get_keywords(self) -> list: return list(self._tags)
     def set_keywords(self, keywords: list):
         self._clear_all()
-        for kw in keywords:
-            self._add_tag(kw)
+        for kw in keywords: self._add_tag(kw)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -948,14 +888,13 @@ class KeywordTagInput(ctk.CTkFrame):
 # ─────────────────────────────────────────────────────────────────────────────
 
 class ScraperApp(ctk.CTk):
-    
     SETTINGS_FILE = "scraper_settings.json"
 
     def __init__(self):
         super().__init__()
 
-        self.title("📘 Facebook News Scraper & Discord Notifier")
-        self.geometry("820x880")
+        self.title("📘 Facebook News Scraper & Discord/Telegram Notifier")
+        self.geometry("820x950")
         self.resizable(True, True)
         ctk.set_appearance_mode("dark")
         ctk.set_default_color_theme("blue")
@@ -982,74 +921,44 @@ class ScraperApp(ctk.CTk):
         outer.grid(row=0, column=0, sticky="nsew", padx=10, pady=10)
         outer.grid_columnconfigure(0, weight=1)
 
-        title_lbl = ctk.CTkLabel(
-            outer,
-            text="📘 Facebook News Scraper & Discord Notifier",
-            font=ctk.CTkFont(size=18, weight="bold"),
-        )
+        title_lbl = ctk.CTkLabel(outer, text="📘 Facebook News Scraper Notifier", font=ctk.CTkFont(size=18, weight="bold"))
         title_lbl.pack(pady=(10, 4))
 
-        subtitle_lbl = ctk.CTkLabel(
-            outer,
-            text="Automated keyword-based post monitoring with Discord alerts",
-            font=ctk.CTkFont(size=11),
-            text_color="gray",
-        )
+        subtitle_lbl = ctk.CTkLabel(outer, text="Automated keyword-based post monitoring with Discord & Telegram alerts", font=ctk.CTkFont(size=11), text_color="gray")
         subtitle_lbl.pack(pady=(0, 10))
 
         cred_frame = ctk.CTkFrame(outer)
         cred_frame.pack(fill="x", padx=6, pady=4)
-
         self._section_label(cred_frame, "🔐 Section 1 — Facebook Credentials")
-
         ctk.CTkLabel(cred_frame, text="Email:").pack(anchor="w", padx=12)
         self.email_var = ctk.StringVar()
-        self.email_entry = ctk.CTkEntry(
-            cred_frame, textvariable=self.email_var, placeholder_text="your@email.com", width=400
-        )
+        self.email_entry = ctk.CTkEntry(cred_frame, textvariable=self.email_var, placeholder_text="your@email.com", width=400)
         self.email_entry.pack(anchor="w", padx=12, pady=(0, 6))
-
         ctk.CTkLabel(cred_frame, text="Password:").pack(anchor="w", padx=12)
         self.pass_var = ctk.StringVar()
-        self.pass_entry = ctk.CTkEntry(
-            cred_frame, textvariable=self.pass_var, show="●", placeholder_text="รหัสผ่าน", width=400
-        )
+        self.pass_entry = ctk.CTkEntry(cred_frame, textvariable=self.pass_var, show="●", placeholder_text="รหัสผ่าน", width=400)
         self.pass_entry.pack(anchor="w", padx=12, pady=(0, 10))
 
         target_frame = ctk.CTkFrame(outer)
         target_frame.pack(fill="x", padx=6, pady=4)
-
         self._section_label(target_frame, "🎯 Section 2 — Target Settings")
-
         ctk.CTkLabel(target_frame, text="URL เพจเป้าหมาย (แต่ละบรรทัด = 1 เพจ):").pack(anchor="w", padx=12)
         self.pages_textbox = ctk.CTkTextbox(target_frame, height=100)
         self.pages_textbox.pack(fill="x", padx=12, pady=(0, 6))
         self.pages_textbox.insert("1.0", "https://www.facebook.com/BBCnewsThai\nhttps://www.facebook.com/voathai")
-
-        ctk.CTkLabel(
-            target_frame,
-            text="🔑 Keywords — พิมพ์แล้วกด Enter หรือ ＋ | รองรับ #แฮชแท็ก | วางหลายคำคั่น , ได้เลย",
-            font=ctk.CTkFont(size=11),
-        ).pack(anchor="w", padx=12)
-        self.keywords_widget = KeywordTagInput(
-            target_frame,
-            defaults=["เพื่อไทย","แพทองธาร","ทักษิณ","เศรษฐา","พรรคเพื่อไทย","อนุทิน","นายก","จุลพันธ์","#ข่าวการเมือง","#เพื่อไทย","อว","ยศชนัน","รองนายกรัฐมนตรี","นายยศชนัน","เชน","อ.เชน"],
-        )
+        ctk.CTkLabel(target_frame, text="🔑 Keywords — พิมพ์แล้วกด Enter หรือ ＋ | รองรับ #แฮชแท็ก | วางหลายคำคั่น , ได้เลย", font=ctk.CTkFont(size=11)).pack(anchor="w", padx=12)
+        self.keywords_widget = KeywordTagInput(target_frame, defaults=["เพื่อไทย","แพทองธาร","ทักษิณ","เศรษฐา"])
         self.keywords_widget.pack(fill="x", padx=8, pady=(0, 10))
 
         time_frame = ctk.CTkFrame(outer)
         time_frame.pack(fill="x", padx=6, pady=4)
-
         self._section_label(time_frame, "⏱️ Section 3 — Timeframe & Loop Settings")
-
         row3 = ctk.CTkFrame(time_frame, fg_color="transparent")
         row3.pack(fill="x", padx=12)
-
         ctk.CTkLabel(row3, text="ดึงโพสต์ย้อนหลัง (ชั่วโมง):").grid(row=0, column=0, padx=(0, 10), pady=4, sticky="w")
         self.hours_var = ctk.StringVar(value="6")
         self.hours_entry = ctk.CTkEntry(row3, textvariable=self.hours_var, width=80)
         self.hours_entry.grid(row=0, column=1, pady=4, sticky="w")
-
         ctk.CTkLabel(row3, text="   วนลูปทุก (นาที):").grid(row=0, column=2, padx=(20, 10), pady=4, sticky="w")
         self.loop_var = ctk.StringVar(value="30")
         self.loop_entry = ctk.CTkEntry(row3, textvariable=self.loop_var, width=80)
@@ -1057,107 +966,52 @@ class ScraperApp(ctk.CTk):
 
         discord_frame = ctk.CTkFrame(outer)
         discord_frame.pack(fill="x", padx=6, pady=4)
-
-        self._section_label(discord_frame, "💬 Section 4 — Discord Webhook")
-
+        self._section_label(discord_frame, "💬 Section 4 — Discord Webhook (Optional)")
         ctk.CTkLabel(discord_frame, text="Webhook URL:").pack(anchor="w", padx=12)
         self.webhook_var = ctk.StringVar()
-        self.webhook_entry = ctk.CTkEntry(
-            discord_frame, textvariable=self.webhook_var,
-            placeholder_text="https://discord.com/api/webhooks/...", width=560
-        )
+        self.webhook_entry = ctk.CTkEntry(discord_frame, textvariable=self.webhook_var, placeholder_text="https://discord.com/api/webhooks/...", width=560)
         self.webhook_entry.pack(anchor="w", padx=12, pady=(0, 10))
+
+        tg_frame = ctk.CTkFrame(outer)
+        tg_frame.pack(fill="x", padx=6, pady=4)
+        self._section_label(tg_frame, "✈️ Section 5 — Telegram Settings (Optional)")
+        ctk.CTkLabel(tg_frame, text="Bot Token:").pack(anchor="w", padx=12)
+        self.tg_token_var = ctk.StringVar()
+        self.tg_token_entry = ctk.CTkEntry(tg_frame, textvariable=self.tg_token_var, placeholder_text="123456789:ABCDefghIJKlmNoPQRsTUVwxyZ", width=560)
+        self.tg_token_entry.pack(anchor="w", padx=12, pady=(0, 6))
+        ctk.CTkLabel(tg_frame, text="Chat ID:").pack(anchor="w", padx=12)
+        self.tg_chatid_var = ctk.StringVar()
+        self.tg_chatid_entry = ctk.CTkEntry(tg_frame, textvariable=self.tg_chatid_var, placeholder_text="-100123456789", width=560)
+        self.tg_chatid_entry.pack(anchor="w", padx=12, pady=(0, 10))
 
         ctrl_frame = ctk.CTkFrame(outer)
         ctrl_frame.pack(fill="x", padx=6, pady=4)
-
-        self._section_label(ctrl_frame, "🎮 Section 5 — Controls")
-
+        self._section_label(ctrl_frame, "🎮 Section 6 — Controls")
         btn_row = ctk.CTkFrame(ctrl_frame, fg_color="transparent")
         btn_row.pack(padx=12, pady=(0, 10))
-
-        self.start_btn = ctk.CTkButton(
-            btn_row, text="▶ Start", width=120, height=44,
-            fg_color="#1877F2", hover_color="#145db8",
-            font=ctk.CTkFont(size=14, weight="bold"),
-            command=self._on_start,
-        )
+        self.start_btn = ctk.CTkButton(btn_row, text="▶ Start", width=120, height=44, fg_color="#1877F2", hover_color="#145db8", font=ctk.CTkFont(size=14, weight="bold"), command=self._on_start)
         self.start_btn.grid(row=0, column=0, padx=6)
-
-        self.stop_btn = ctk.CTkButton(
-            btn_row, text="⏹ Stop", width=120, height=44,
-            fg_color="#E53935", hover_color="#b71c1c",
-            font=ctk.CTkFont(size=14, weight="bold"),
-            command=self._on_stop,
-            state="disabled",
-        )
+        self.stop_btn = ctk.CTkButton(btn_row, text="⏹ Stop", width=120, height=44, fg_color="#E53935", hover_color="#b71c1c", font=ctk.CTkFont(size=14, weight="bold"), command=self._on_stop, state="disabled")
         self.stop_btn.grid(row=0, column=1, padx=6)
-
-        self.resume_btn = ctk.CTkButton(
-            btn_row, text="▶▶ Resume (แก้ 2FA)",
-            width=160, height=44,
-            fg_color="#FF8F00", hover_color="#e65100",
-            font=ctk.CTkFont(size=13, weight="bold"),
-            command=self._on_resume,
-            state="disabled",
-        )
+        self.resume_btn = ctk.CTkButton(btn_row, text="▶▶ Resume (แก้ 2FA)", width=160, height=44, fg_color="#FF8F00", hover_color="#e65100", font=ctk.CTkFont(size=13, weight="bold"), command=self._on_resume, state="disabled")
         self.resume_btn.grid(row=0, column=2, padx=6)
-
-        self.hide_browser_btn = ctk.CTkButton(
-            btn_row,
-            text="🙈 ซ่อน Browser",
-            width=120, height=44,
-            fg_color="#4A148C", hover_color="#6A1FBF",
-            font=ctk.CTkFont(size=13, weight="bold"),
-            command=self._on_hide_browser,
-            state="disabled",  
-        )
+        self.hide_browser_btn = ctk.CTkButton(btn_row, text="🙈 ซ่อน Browser", width=120, height=44, fg_color="#4A148C", hover_color="#6A1FBF", font=ctk.CTkFont(size=13, weight="bold"), command=self._on_hide_browser, state="disabled")
         self.hide_browser_btn.grid(row=0, column=3, padx=6)
-
-        self.save_cfg_btn = ctk.CTkButton(
-            btn_row,
-            text="💾 บันทึกการตั้งค่า",
-            width=140, height=44,
-            fg_color="#2E7D32", hover_color="#1B5E20",
-            font=ctk.CTkFont(size=13, weight="bold"),
-            command=self._save_settings,
-        )
+        self.save_cfg_btn = ctk.CTkButton(btn_row, text="💾 บันทึกตั้งค่า", width=120, height=44, fg_color="#2E7D32", hover_color="#1B5E20", font=ctk.CTkFont(size=13, weight="bold"), command=self._save_settings)
         self.save_cfg_btn.grid(row=0, column=4, padx=6)
 
-        self._hide_hint_lbl = ctk.CTkLabel(
-            ctrl_frame,
-            text="ปุ่มซ่อน Browser จะเปิดใช้งานได้หลังจากบันทึก Cookies สำเร็จ",
-            font=ctk.CTkFont(size=10),
-            text_color="gray50",
-        )
+        self._hide_hint_lbl = ctk.CTkLabel(ctrl_frame, text="ปุ่มซ่อน Browser จะเปิดใช้งานได้หลังจากบันทึก Cookies สำเร็จ", font=ctk.CTkFont(size=10), text_color="gray50")
         self._hide_hint_lbl.pack(pady=(0, 2))
-
-        self.status_lbl = ctk.CTkLabel(
-            ctrl_frame, text="● หยุดทำงาน",
-            text_color="#E53935",
-            font=ctk.CTkFont(size=12, weight="bold"),
-        )
+        self.status_lbl = ctk.CTkLabel(ctrl_frame, text="● หยุดทำงาน", text_color="#E53935", font=ctk.CTkFont(size=12, weight="bold"))
         self.status_lbl.pack(pady=(0, 8))
 
         log_frame = ctk.CTkFrame(outer)
         log_frame.pack(fill="both", expand=True, padx=6, pady=4)
-
-        self._section_label(log_frame, "📋 Section 6 — Real-time Log")
-
-        self.log_textbox = ctk.CTkTextbox(
-            log_frame, height=260, state="disabled",
-            font=ctk.CTkFont(family="Courier New", size=11),
-        )
+        self._section_label(log_frame, "📋 Section 7 — Real-time Log")
+        self.log_textbox = ctk.CTkTextbox(log_frame, height=260, state="disabled", font=ctk.CTkFont(family="Courier New", size=11))
         self.log_textbox.pack(fill="both", expand=True, padx=12, pady=(0, 10))
-
-        clear_btn = ctk.CTkButton(
-            log_frame, text="🗑 ล้าง Log", width=120, height=28,
-            fg_color="gray30", hover_color="gray20",
-            command=self._clear_log,
-        )
+        clear_btn = ctk.CTkButton(log_frame, text="🗑 ล้าง Log", width=120, height=28, fg_color="gray30", hover_color="gray20", command=self._clear_log)
         clear_btn.pack(anchor="e", padx=12, pady=(0, 10))
-
-    # ── Settings Logic ────────────────────────────────────────────────────────
 
     def _save_settings(self):
         settings = {
@@ -1167,7 +1021,9 @@ class ScraperApp(ctk.CTk):
             "keywords": self.keywords_widget.get_keywords(),
             "hours": self.hours_var.get(),
             "loop": self.loop_var.get(),
-            "webhook": self.webhook_var.get()
+            "webhook": self.webhook_var.get(),
+            "tg_token": self.tg_token_var.get(),
+            "tg_chatid": self.tg_chatid_var.get()
         }
         try:
             with open(self.SETTINGS_FILE, "w", encoding="utf-8") as f:
@@ -1177,30 +1033,24 @@ class ScraperApp(ctk.CTk):
             self._show_error(f"⚠️ เกิดข้อผิดพลาดในการบันทึกการตั้งค่า: {e}")
 
     def _load_settings(self):
-        if not os.path.exists(self.SETTINGS_FILE):
-            return
+        if not os.path.exists(self.SETTINGS_FILE): return
         try:
-            with open(self.SETTINGS_FILE, "r", encoding="utf-8") as f:
-                settings = json.load(f)
-            
+            with open(self.SETTINGS_FILE, "r", encoding="utf-8") as f: settings = json.load(f)
             self.email_var.set(settings.get("email", ""))
             self.pass_var.set(settings.get("password", ""))
-            
             pages = settings.get("pages", "")
             if pages:
                 self.pages_textbox.delete("1.0", "end")
                 self.pages_textbox.insert("1.0", pages)
-                
             self.keywords_widget.set_keywords(settings.get("keywords", []))
             self.hours_var.set(settings.get("hours", "6"))
             self.loop_var.set(settings.get("loop", "30"))
             self.webhook_var.set(settings.get("webhook", ""))
-            
+            self.tg_token_var.set(settings.get("tg_token", ""))
+            self.tg_chatid_var.set(settings.get("tg_chatid", ""))
             self._log("🔄 โหลดการตั้งค่าเดิมเรียบร้อยแล้ว")
         except Exception as e:
             self._log(f"⚠️ โหลดการตั้งค่าไม่สำเร็จ: {e}")
-
-    # ── Log handling ──────────────────────────────────────────────────────────
 
     def _log(self, message: str):
         self._log_queue.put(f"[{datetime.now().strftime('%H:%M:%S')}] {message}")
@@ -1213,8 +1063,7 @@ class ScraperApp(ctk.CTk):
                 self.log_textbox.insert("end", msg + "\n")
                 self.log_textbox.see("end")  
                 self.log_textbox.configure(state="disabled")
-        except Empty:
-            pass
+        except Empty: pass
         self.after(100, self._poll_log_queue)  
 
     def _clear_log(self):
@@ -1222,13 +1071,16 @@ class ScraperApp(ctk.CTk):
         self.log_textbox.delete("1.0", "end")
         self.log_textbox.configure(state="disabled")
 
-    # ── Button Handlers ───────────────────────────────────────────────────────
-
     def _on_start(self):
         email = self.email_var.get().strip()
         password = self.pass_var.get().strip()
         pages_raw = self.pages_textbox.get("1.0", "end").strip()
         webhook = self.webhook_var.get().strip()
+        tg_token = self.tg_token_var.get().strip()
+        tg_chatid = self.tg_chatid_var.get().strip()
+        if tg_token:
+            self._tg_listener = TelegramListener(tg_token)
+            self._tg_listener.start()
 
         try:
             hours = int(self.hours_var.get().strip())
@@ -1246,14 +1098,15 @@ class ScraperApp(ctk.CTk):
             self._show_error("⚠️ กรุณากรอก URL เพจอย่างน้อย 1 เพจ")
             return
 
-        keywords = self.keywords_widget.get_keywords()
-
-        if not webhook:
-            self._show_error("⚠️ กรุณากรอก Discord Webhook URL")
+        if not webhook and not (tg_token and tg_chatid):
+            self._show_error("⚠️ กรุณากรอก Discord Webhook หรือ Telegram Bot Token + Chat ID อย่างใดอย่างหนึ่งเป็นอย่างน้อย")
             return
 
+        keywords = self.keywords_widget.get_keywords()
         discord = DiscordNotifier(webhook)
-        self._scraper = FacebookScraper(self._log, self._db, discord, on_cookies_saved=self._enable_hide_btn)
+        tg = TelegramNotifier(tg_token, tg_chatid)
+
+        self._scraper = FacebookScraper(self._log, self._db, discord, tg, on_cookies_saved=self._enable_hide_btn)
 
         self.start_btn.configure(state="disabled")
         self.stop_btn.configure(state="normal")
@@ -1269,12 +1122,11 @@ class ScraperApp(ctk.CTk):
             name="ScraperThread",
         )
         self._scraper_thread.start()
-
         self.after(500, self._check_thread_alive)
 
     def _on_stop(self):
-        if self._scraper:
-            self._scraper.stop()
+        if self._scraper: self._scraper.stop()
+        if hasattr(self, '_tg_listener'): self._tg_listener.stop()
         self._log("🛑 ส่งสัญญาณหยุด Scraper แล้ว...")
         self._reset_ui()
 
@@ -1285,20 +1137,14 @@ class ScraperApp(ctk.CTk):
 
     def _enable_hide_btn(self):
         self.hide_browser_btn.configure(state="normal")
-        self._hide_hint_lbl.configure(
-            text="✅ Cookies บันทึกแล้ว — กด 🙈 ซ่อน Browser ได้เลย",
-            text_color="#4CAF50",
-        )
+        self._hide_hint_lbl.configure(text="✅ Cookies บันทึกแล้ว — กด 🙈 ซ่อน Browser ได้เลย", text_color="#4CAF50")
 
     def _on_hide_browser(self):
         if self._scraper and self._scraper.driver:
             try:
                 self._scraper.driver.minimize_window()
                 self._log("🙈 ซ่อน Browser แล้ว (Minimised)")
-                self.hide_browser_btn.configure(
-                    text="👁 แสดง Browser",
-                    command=self._on_show_browser,
-                )
+                self.hide_browser_btn.configure(text="👁 แสดง Browser", command=self._on_show_browser)
             except Exception as e:
                 self._log(f"⚠️ ซ่อน Browser ไม่สำเร็จ: {e}")
 
@@ -1307,10 +1153,7 @@ class ScraperApp(ctk.CTk):
             try:
                 self._scraper.driver.maximize_window()
                 self._log("👁 แสดง Browser แล้ว")
-                self.hide_browser_btn.configure(
-                    text="🙈 ซ่อน Browser",
-                    command=self._on_hide_browser,
-                )
+                self.hide_browser_btn.configure(text="🙈 ซ่อน Browser", command=self._on_hide_browser)
             except Exception as e:
                 self._log(f"⚠️ แสดง Browser ไม่สำเร็จ: {e}")
 
@@ -1326,14 +1169,8 @@ class ScraperApp(ctk.CTk):
         self.stop_btn.configure(state="disabled")
         self.resume_btn.configure(state="disabled")
         self.status_lbl.configure(text="● หยุดทำงาน", text_color="#E53935")
-        self.hide_browser_btn.configure(
-            state="disabled", text="🙈 ซ่อน Browser",
-            command=self._on_hide_browser,
-        )
-        self._hide_hint_lbl.configure(
-            text="ปุ่มซ่อน Browser จะเปิดใช้งานได้หลังจากบันทึก Cookies สำเร็จ",
-            text_color="gray50",
-        )
+        self.hide_browser_btn.configure(state="disabled", text="🙈 ซ่อน Browser", command=self._on_hide_browser)
+        self._hide_hint_lbl.configure(text="ปุ่มซ่อน Browser จะเปิดใช้งานได้หลังจากบันทึก Cookies สำเร็จ", text_color="gray50")
 
     def _show_error(self, msg: str):
         self._log(msg)
@@ -1345,11 +1182,9 @@ class ScraperApp(ctk.CTk):
         ctk.CTkButton(dialog, text="ตกลง", command=dialog.destroy).pack()
 
     def on_close(self):
-        if self._scraper:
-            self._scraper.stop()
+        if self._scraper: self._scraper.stop()
         self._db.close()
         self.destroy()
-
 
 # ─────────────────────────────────────────────────────────────────────────────
 # ENTRY POINT
