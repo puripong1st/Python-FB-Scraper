@@ -707,13 +707,86 @@ class FacebookScraper:
         if "login_attempt"         in url:                           return "Login Attempt Blocked"
         if "suspended"             in url or "disabled"    in url:   return "Account Suspended/Disabled"
 
+        # ── Identity Verification: ตรวจ 3 ชั้น + re-confirm ป้องกัน False Positive ──
+        #
+        # ปัญหาเดิม: body.text scan จับทุกอย่างรวม notification/menu
+        #
+        # ชั้น 1: URL — แน่นอนที่สุด (trigger ทันที ไม่ต้อง re-confirm)
+        # ชั้น 2: หน้าเหลือแค่ form เดียว + ปุ่ม submit — โครงสร้างเฉพาะของ verify page
+        # ชั้น 3: heading (h1/h2) มีข้อความ — heading ไม่ใช่ notification banner
+        # Re-confirm: ถ้าชั้น 2-3 trigger → รอ 2 วิ แล้วตรวจซ้ำ ยืนยัน 2 ครั้งก่อน alert
+
+        _ID_URL = ("identity", "identity_verification", "id_verification",
+                   "confirm_identity", "verify_identity")
+        _ID_TEXT = ("confirm your identity", "ยืนยันตัวตน")
+
         try:
-            body_text = self.driver.find_element(By.TAG_NAME, "body").text.lower()
-            if "confirm your identity" in body_text or "ยืนยันตัวตน" in body_text:
+            # ชั้น 1: URL บ่งชี้โดยตรง
+            if any(sig in url for sig in _ID_URL):
                 return "Identity Verification"
+
+            # ชั้น 2: โครงสร้างเฉพาะหน้า Verify — มี form ที่ action ชี้ไป identity/checkpoint
+            #         และมีปุ่ม submit เพียงปุ่มเดียวโดดๆ บน document
+            found_verify_form = self.driver.execute_script("""
+                const forms = Array.from(document.querySelectorAll('form'));
+                return forms.some(f => {
+                    const action = (f.action || '').toLowerCase();
+                    return action.includes('identity') || action.includes('checkpoint')
+                           || action.includes('confirm');
+                });
+            """)
+
+            # ชั้น 3: heading h1/h2 ที่มองเห็นได้ มีข้อความ identity verify
+            found_heading = self.driver.execute_script("""
+                const signals = arguments[0];
+                const headings = document.querySelectorAll('h1, h2, h3');
+                for (const h of headings) {
+                    const txt = h.innerText ? h.innerText.toLowerCase() : '';
+                    if (!txt) continue;
+                    const style = window.getComputedStyle(h);
+                    if (style.display === 'none' || style.visibility === 'hidden') continue;
+                    if (signals.some(s => txt.includes(s))) return true;
+                }
+                return false;
+            """, list(_ID_TEXT))
+
+            if found_verify_form or found_heading:
+                # Re-confirm: รอ 2 วิ แล้วตรวจซ้ำ — ถ้าเป็น notification ที่หายไปเองจะผ่านได้
+                self.log("⏳ พบสัญญาณ Identity Verification — ตรวจสอบซ้ำใน 2 วินาที...")
+                time.sleep(2)
+                url2 = self.driver.current_url.lower()
+
+                # ถ้า URL เปลี่ยนไป → หน้าเดิมหายไปแล้ว ไม่นับ
+                if url2 != url:
+                    return None
+
+                # ตรวจ heading ซ้ำอีกครั้งยืนยัน
+                confirmed = self.driver.execute_script("""
+                    const signals = arguments[0];
+                    const headings = document.querySelectorAll('h1, h2, h3');
+                    for (const h of headings) {
+                        const txt = h.innerText ? h.innerText.toLowerCase() : '';
+                        if (!txt) continue;
+                        const style = window.getComputedStyle(h);
+                        if (style.display === 'none' || style.visibility === 'hidden') continue;
+                        if (signals.some(s => txt.includes(s))) return true;
+                    }
+                    // ตรวจ form ซ้ำด้วย
+                    const forms = Array.from(document.querySelectorAll('form'));
+                    return forms.some(f => {
+                        const action = (f.action || '').toLowerCase();
+                        return action.includes('identity') || action.includes('checkpoint')
+                               || action.includes('confirm');
+                    });
+                """, list(_ID_TEXT))
+
+                if confirmed:
+                    return "Identity Verification"
+                else:
+                    self.log("✅ สัญญาณหายไปเอง — ไม่ใช่ Identity Verification จริง (false positive)")
+
         except Exception as e:
-            # [3] log แทน silent pass
-            self.log(f"⚠️ _detect_obstacle body check: {e}")
+            self.log(f"⚠️ _detect_obstacle identity check: {e}")
         return None
 
     def _handle_obstacle(self, obstacle_type: str):
@@ -904,10 +977,16 @@ class FacebookScraper:
 
                         if not post_url:
                             try:
-                                anchors = article.find_elements(By.TAG_NAME, "a")
-                                for a in anchors:
-                                    href = a.get_attribute("href") or ""
-                                    if page_name.lower() in href.lower() and len(href) > 30:
+                                # ดึง href ทั้งหมดผ่าน JS ทีเดียว — ไม่ loop Selenium element
+                                # เพื่อป้องกัน StaleElementReferenceException จาก DOM re-render
+                                hrefs: list = self.driver.execute_script(
+                                    "return Array.from(arguments[0].querySelectorAll('a[href]'))"
+                                    ".map(a => a.href).filter(h => h && h.length > 30);",
+                                    article,
+                                )
+                                pn_lower = page_name.lower()
+                                for href in hrefs:
+                                    if pn_lower in href.lower():
                                         post_url = href
                                         break
                             except Exception as e:
