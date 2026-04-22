@@ -900,6 +900,45 @@ class FacebookScraper:
             self.log(f"⚠️ _get_articles error: {e}")
             return []
 
+    def _parse_post_timestamp_text(self, raw_text: str) -> "datetime | None":
+        """Parse timestamp จาก raw text string (ไม่ต้องการ WebElement — ไม่มี stale risk)"""
+        now = datetime.now()
+        try:
+            lines = raw_text.split("\n")[:10]
+            for line in lines:
+                text = line.lower().strip().replace("·", "").replace(",", "").strip()
+                if not text:
+                    continue
+                if "เพิ่ง" in text or "เมื่อสักครู่" in text or "just now" in text:
+                    return now
+                if "เมื่อวาน" in text or "yesterday" in text:
+                    return now - timedelta(days=1)
+                match = re.search(
+                    r"(\d+)\s*(นาที|ชั่วโมง|ชม|วัน|สัปดาห์|เดือน|ปี|mins?|m\b|hrs?|h\b|days?|d\b|weeks?|w\b|months?|years?)",
+                    text,
+                )
+                if match:
+                    num  = int(match.group(1))
+                    unit = match.group(2)
+                    if   "นาที"    in unit or "min" in unit or unit == "m": return now - timedelta(minutes=num)
+                    elif "ชม"      in unit or "ชั่วโมง" in unit or "hr" in unit or unit == "h": return now - timedelta(hours=num)
+                    elif "วัน"     in unit or "day" in unit or unit == "d": return now - timedelta(days=num)
+                    elif "สัปดาห์" in unit or "week" in unit or unit == "w": return now - timedelta(weeks=num)
+                    elif "เดือน"   in unit or "month" in unit: return now - timedelta(days=num * 30)
+                    elif "ปี"      in unit or "year"  in unit: return now - timedelta(days=num * 365)
+                thai_months = [
+                    "ม.ค.", "ก.พ.", "มี.ค.", "เม.ย.", "พ.ค.", "มิ.ย.",
+                    "ก.ค.", "ส.ค.", "ก.ย.", "ต.ค.", "พ.ย.", "ธ.ค.",
+                    "มกราคม", "กุมภาพันธ์", "มีนาคม", "เมษายน", "พฤษภาคม",
+                    "มิถุนายน", "กรกฎาคม", "สิงหาคม", "กันยายน", "ตุลาคม",
+                    "พฤศจิกายน", "ธันวาคม",
+                ]
+                if any(m in text for m in thai_months) and re.search(r"\d+", text):
+                    return None
+        except Exception as e:
+            self.log(f"⚠️ _parse_post_timestamp_text: {e}")
+        return None
+
     # ─────────────────────────────────────────────────────────────────────────
     # Main scrape logic
     # ─────────────────────────────────────────────────────────────────────────
@@ -956,41 +995,55 @@ class FacebookScraper:
 
                 new_in_this_round = False
 
-                for article in articles:
+                # ── ดึงข้อมูล URL + text จาก articles ทั้งหมดผ่าน JS ทีเดียว ──────
+                # เพื่อป้องกัน StaleElementReferenceException จาก Facebook re-render
+                # ระหว่างวน loop — ดึงเป็น plain data ก่อน แล้วค่อย process
+                try:
+                    article_data: list = self.driver.execute_script("""
+                        const pn = arguments[0].toLowerCase();
+                        const URL_PATTERNS = ['/posts/', '/videos/', 'story_fbid', '/permalink/'];
+                        return Array.from(document.querySelectorAll("div[role='article']")).map(art => {
+                            let postUrl = '';
+                            const anchors = Array.from(art.querySelectorAll('a[href]'));
+                            for (const a of anchors) {
+                                const h = a.href || '';
+                                if (URL_PATTERNS.some(p => h.includes(p))) { postUrl = h; break; }
+                            }
+                            if (!postUrl) {
+                                for (const a of anchors) {
+                                    const h = a.href || '';
+                                    if (h.length > 30 && h.toLowerCase().includes(pn)) { postUrl = h; break; }
+                                }
+                            }
+                            const msgEl = art.querySelector(
+                                '[data-ad-comet-preview="message"], [data-testid="post_message"]'
+                            );
+                            const postText = msgEl ? (msgEl.innerText || '').trim() : '';
+                            let imageUrl = '';
+                            for (const img of art.querySelectorAll('img[src*="scontent"]')) {
+                                const src = img.src || '';
+                                if (!src || src.includes('emoji')) continue;
+                                const w = parseInt(img.getAttribute('width') || '0');
+                                if (w && w <= 100) continue;
+                                imageUrl = src; break;
+                            }
+                            const rawText = (art.innerText || '').split('\\n').slice(0, 10).join('\\n');
+                            return { postUrl, postText, imageUrl, rawText };
+                        });
+                    """, page_name)
+                except Exception as e:
+                    self.log(f"⚠️ ดึง article data ล้มเหลว: {type(e).__name__} — ข้ามรอบนี้")
+                    article_data = []
+
+                for data in article_data:
                     if self._stop_event.is_set() or stop_early:
                         break
                     self._resume_event.wait()
 
                     try:
-                        # ── ดึง post URL ─────────────────────────────────────────
-                        post_url = ""
-                        try:
-                            link_els = article.find_elements(
-                                By.XPATH,
-                                ".//a[contains(@href, '/posts/') or contains(@href, '/videos/') "
-                                "or contains(@href, 'story_fbid') or contains(@href, '/permalink/')]",
-                            )
-                            if link_els:
-                                post_url = link_els[0].get_attribute("href") or ""
-                        except (NoSuchElementException, StaleElementReferenceException):
-                            pass
+                        # ── ดึง post URL (จาก JS data ที่ดึงมาแล้ว) ──────────────
+                        post_url = data.get("postUrl", "")
 
-                        if not post_url:
-                            try:
-                                # ดึง href ทั้งหมดผ่าน JS ทีเดียว — ไม่ loop Selenium element
-                                # เพื่อป้องกัน StaleElementReferenceException จาก DOM re-render
-                                hrefs: list = self.driver.execute_script(
-                                    "return Array.from(arguments[0].querySelectorAll('a[href]'))"
-                                    ".map(a => a.href).filter(h => h && h.length > 30);",
-                                    article,
-                                )
-                                pn_lower = page_name.lower()
-                                for href in hrefs:
-                                    if pn_lower in href.lower():
-                                        post_url = href
-                                        break
-                            except Exception as e:
-                                self.log(f"⚠️ fallback anchor search: {e}")
 
                         if not post_url:
                             continue
@@ -1010,7 +1063,7 @@ class FacebookScraper:
                             continue
 
                         # ── ตรวจเวลาโพสต์ ─────────────────────────────────────
-                        post_time = self._parse_post_timestamp(self.driver, article)
+                        post_time = self._parse_post_timestamp_text(data.get("rawText", ""))
                         if post_time is not None:
                             if post_time < cutoff_time:
                                 consecutive_old += 1
@@ -1031,53 +1084,15 @@ class FacebookScraper:
                         else:
                             self.log("⚠️ อ่านเวลาไม่ออก... กำลังตรวจสอบ Keywords ต่อไป")
 
-                        # ── กด "ดูเพิ่มเติม" ──────────────────────────────────
-                        try:
-                            more_btns = article.find_elements(
-                                By.XPATH,
-                                ".//div[@role='button' and (contains(., 'ดูเพิ่มเติม') or contains(., 'See more'))]",
-                            )
-                            for btn in more_btns:
-                                if btn.is_displayed():
-                                    self.driver.execute_script("arguments[0].click();", btn)
-                                    time.sleep(0.5)
-                        except Exception as e:
-                            self.log(f"⚠️ กดปุ่ม 'ดูเพิ่มเติม' ไม่สำเร็จ: {e}")
+                        # ── "ดูเพิ่มเติม" ── ถูกดึงผ่าน JS แล้วใน article_data ──────
 
-                        # ── ดึงข้อความ ────────────────────────────────────────
-                        post_text = ""
-                        try:
-                            text_containers = article.find_elements(
-                                By.XPATH,
-                                ".//div[@data-ad-comet-preview='message'] | .//div[@data-testid='post_message']",
-                            )
-                            if text_containers:
-                                post_text = text_containers[0].text.strip()
-                            if not post_text:
-                                continue
-                        except StaleElementReferenceException:
+                        # ── ดึงข้อความ (จาก JS data) ──────────────────────────
+                        post_text = data.get("postText", "")
+                        if not post_text:
                             continue
 
-                        # ── ดึงรูปภาพ ─────────────────────────────────────────
-                        image_url = None
-                        try:
-                            imgs = article.find_elements(
-                                By.XPATH, ".//img[contains(@src, 'scontent')]"
-                            )
-                            for img in imgs:
-                                src = img.get_attribute("src")
-                                if src and "emoji" not in src:
-                                    try:
-                                        w = img.get_attribute("width")
-                                        if w and int(w) <= 100:
-                                            continue
-                                    except (ValueError, TypeError) as e:
-                                        # [3] แทน bare except: pass
-                                        self.log(f"⚠️ อ่านขนาดรูปไม่ได้: {e}")
-                                    image_url = src
-                                    break
-                        except Exception as e:
-                            self.log(f"⚠️ ดึงรูปภาพไม่สำเร็จ: {e}")
+                        # ── ดึงรูปภาพ (จาก JS data) ───────────────────────────
+                        image_url = data.get("imageUrl") or None
 
                         # ── ตรวจ Keywords ─────────────────────────────────────
                         found_keywords = []
