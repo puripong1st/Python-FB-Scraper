@@ -995,6 +995,27 @@ class FacebookScraper:
 
                 new_in_this_round = False
 
+                # ── คลิกปุ่ม "ดูเพิ่มเติม" / "See More" ทุกโพสต์ก่อนดึงข้อมูล ──
+                # เพื่อให้ได้ข้อความเต็ม ไม่ถูกตัดกลางคัน
+                try:
+                    self.driver.execute_script("""
+                        const SEE_MORE = ['ดูเพิ่มเติม', 'see more', 'see More', 'See More', 'See more'];
+                        document.querySelectorAll("div[role='article']").forEach(art => {
+                            art.querySelectorAll(
+                                'div[role="button"], span[role="button"], ' +
+                                'div[class*="see_more"], div[class*="truncate"]'
+                            ).forEach(btn => {
+                                const t = (btn.innerText || btn.textContent || '').trim();
+                                if (SEE_MORE.some(sm => t === sm || t.startsWith(sm))) {
+                                    try { btn.click(); } catch(e) {}
+                                }
+                            });
+                        });
+                    """)
+                    time.sleep(0.6)  # รอให้ข้อความขยายตัว
+                except Exception as e:
+                    self.log(f"⚠️ คลิก 'ดูเพิ่มเติม' ไม่สำเร็จ: {e}")
+
                 # ── ดึงข้อมูล URL + text จาก articles ทั้งหมดผ่าน JS ทีเดียว ──────
                 # เพื่อป้องกัน StaleElementReferenceException จาก Facebook re-render
                 # ระหว่างวน loop — ดึงเป็น plain data ก่อน แล้วค่อย process
@@ -1084,7 +1105,7 @@ class FacebookScraper:
                         else:
                             self.log("⚠️ อ่านเวลาไม่ออก... กำลังตรวจสอบ Keywords ต่อไป")
 
-                        # ── "ดูเพิ่มเติม" ── ถูกดึงผ่าน JS แล้วใน article_data ──────
+                        # ── ดึงข้อความเต็ม (หลังคลิก "ดูเพิ่มเติม" แล้ว) ──────────────
 
                         # ── ดึงข้อความ (จาก JS data) ──────────────────────────
                         post_text = data.get("postText", "")
@@ -1381,12 +1402,15 @@ class KeywordTagInput(ctk.CTkFrame):
 # ─────────────────────────────────────────────────────────────────────────────
 
 class ScraperApp(ctk.CTk):
-    SETTINGS_FILE = "scraper_settings.json"
+    SETTINGS_FILE  = "scraper_settings.json"   # credentials + webhook + loop
+    PAGES_FILE     = "scraper_pages.json"       # target pages  (แชร์แยกได้)
+    KEYWORDS_FILE  = "scraper_keywords.json"    # keywords       (แชร์แยกได้)
 
     def __init__(self):
         super().__init__()
-        self.title("📘 Facebook News Scraper & Discord/Telegram Notifier")
-        self.geometry("820x950")
+        self.title("📘 Facebook News Scraper  |  Discord & Telegram Notifier")
+        self.geometry("1420x860")
+        self.minsize(1100, 650)
         self.resizable(True, True)
         ctk.set_appearance_mode("dark")
         ctk.set_default_color_theme("blue")
@@ -1398,7 +1422,20 @@ class ScraperApp(ctk.CTk):
 
         self._build_ui()
         self._load_settings()
+        self._load_pages()
+        self._load_keywords()
         self._poll_log_queue()
+
+    def _section_card(self, parent, title: str) -> ctk.CTkFrame:
+        """สร้าง card section พร้อม title สีฟ้า สำหรับ sidebar"""
+        card = ctk.CTkFrame(parent, fg_color=("gray92", "#1c2333"), corner_radius=10)
+        card.pack(fill="x", padx=6, pady=5)
+        ctk.CTkLabel(
+            card, text=title,
+            font=ctk.CTkFont(size=12, weight="bold"),
+            text_color="#58a6ff",
+        ).pack(anchor="w", padx=12, pady=(10, 4))
+        return card
 
     def _section_label(self, parent, text: str) -> ctk.CTkLabel:
         lbl = ctk.CTkLabel(parent, text=text, font=ctk.CTkFont(size=13, weight="bold"))
@@ -1407,182 +1444,291 @@ class ScraperApp(ctk.CTk):
 
     def _build_ui(self):
         self.grid_columnconfigure(0, weight=1)
-        self.grid_rowconfigure(0, weight=1)
+        self.grid_rowconfigure(0, weight=0)   # header bar
+        self.grid_rowconfigure(1, weight=0)   # status bar
+        self.grid_rowconfigure(2, weight=1)   # main content
 
-        outer = ctk.CTkScrollableFrame(self, label_text="")
-        outer.grid(row=0, column=0, sticky="nsew", padx=10, pady=10)
-        outer.grid_columnconfigure(0, weight=1)
+        # ══════════════════════════════════════════════════════════════════
+        # HEADER BAR — ชื่อ + สถานะ + ปุ่มควบคุมทั้งหมด
+        # ══════════════════════════════════════════════════════════════════
+        header = ctk.CTkFrame(self, fg_color="#0d1f3c", height=56, corner_radius=0)
+        header.grid(row=0, column=0, sticky="ew")
+        header.grid_propagate(False)
+        header.grid_columnconfigure(1, weight=1)
 
         ctk.CTkLabel(
-            outer, text="📘 Facebook News Scraper Notifier",
-            font=ctk.CTkFont(size=18, weight="bold"),
-        ).pack(pady=(10, 4))
+            header,
+            text="📘  Facebook News Scraper",
+            font=ctk.CTkFont(size=16, weight="bold"),
+            text_color="white",
+        ).grid(row=0, column=0, padx=16, pady=10, sticky="w")
+
         ctk.CTkLabel(
-            outer,
-            text="Automated keyword-based post monitoring with Discord & Telegram alerts",
+            header,
+            text="Discord & Telegram Notifier",
             font=ctk.CTkFont(size=11),
-            text_color="gray",
-        ).pack(pady=(0, 10))
+            text_color="#7d9ec0",
+        ).grid(row=0, column=1, padx=4, sticky="w")
 
-        # Section 1 — Credentials
-        cred_frame = ctk.CTkFrame(outer)
-        cred_frame.pack(fill="x", padx=6, pady=4)
-        self._section_label(cred_frame, "🔐 Section 1 — Facebook Credentials")
-        ctk.CTkLabel(cred_frame, text="Email:").pack(anchor="w", padx=12)
+        # ปุ่มควบคุมทั้งหมดอยู่ใน header ขวามือ
+        btn_bar = ctk.CTkFrame(header, fg_color="transparent")
+        btn_bar.grid(row=0, column=2, padx=10, sticky="e")
+
+        self.start_btn = ctk.CTkButton(
+            btn_bar, text="▶  Start", width=108, height=36,
+            fg_color="#1877F2", hover_color="#145db8",
+            font=ctk.CTkFont(size=13, weight="bold"), command=self._on_start,
+        )
+        self.start_btn.grid(row=0, column=0, padx=(0, 5))
+
+        self.stop_btn = ctk.CTkButton(
+            btn_bar, text="⏹  Stop", width=108, height=36,
+            fg_color="#c62828", hover_color="#8e0000",
+            font=ctk.CTkFont(size=13, weight="bold"), command=self._on_stop, state="disabled",
+        )
+        self.stop_btn.grid(row=0, column=1, padx=5)
+
+        self.resume_btn = ctk.CTkButton(
+            btn_bar, text="▶▶ Resume", width=140, height=36,
+            fg_color="#e65100", hover_color="#bf360c",
+            font=ctk.CTkFont(size=12, weight="bold"), command=self._on_resume, state="disabled",
+        )
+        self.resume_btn.grid(row=0, column=2, padx=5)
+
+        self.hide_browser_btn = ctk.CTkButton(
+            btn_bar, text="🙈  ซ่อน Browser", width=130, height=36,
+            fg_color="#4A148C", hover_color="#6A1FBF",
+            font=ctk.CTkFont(size=12, weight="bold"), command=self._on_hide_browser, state="disabled",
+        )
+        self.hide_browser_btn.grid(row=0, column=3, padx=5)
+
+        self.save_cfg_btn = ctk.CTkButton(
+            btn_bar, text="💾  บันทึก", width=100, height=36,
+            fg_color="#1b5e20", hover_color="#2e7d32",
+            font=ctk.CTkFont(size=12, weight="bold"), command=self._save_settings,
+        )
+        self.save_cfg_btn.grid(row=0, column=4, padx=(5, 12))
+
+        # ══════════════════════════════════════════════════════════════════
+        # STATUS BAR — แถบสถานะบางๆ ใต้ header
+        # ══════════════════════════════════════════════════════════════════
+        status_bar = ctk.CTkFrame(self, fg_color="#161b22", height=32, corner_radius=0)
+        status_bar.grid(row=1, column=0, sticky="ew")
+        status_bar.grid_propagate(False)
+        status_bar.grid_columnconfigure(1, weight=1)
+
+        self.status_lbl = ctk.CTkLabel(
+            status_bar, text="⬤  หยุดทำงาน",
+            text_color="#E53935", font=ctk.CTkFont(size=12, weight="bold"),
+        )
+        self.status_lbl.grid(row=0, column=0, padx=16, pady=4, sticky="w")
+
+        self._hide_hint_lbl = ctk.CTkLabel(
+            status_bar,
+            text="💡 ปุ่มซ่อน Browser จะเปิดใช้ได้หลัง Cookies บันทึกสำเร็จ",
+            font=ctk.CTkFont(size=10), text_color="gray50",
+        )
+        self._hide_hint_lbl.grid(row=0, column=1, padx=8, pady=4, sticky="w")
+
+        # ══════════════════════════════════════════════════════════════════
+        # MAIN 2-COLUMN CONTENT AREA
+        # ══════════════════════════════════════════════════════════════════
+        main = ctk.CTkFrame(self, fg_color="#0d1117", corner_radius=0)
+        main.grid(row=2, column=0, sticky="nsew")
+        main.grid_columnconfigure(0, weight=0)   # LEFT: sidebar settings
+        main.grid_columnconfigure(1, weight=1)   # RIGHT: log panel
+        main.grid_rowconfigure(0, weight=1)
+
+        # ─── LEFT PANEL: ตั้งค่าทั้งหมด ───────────────────────────────────
+        left_scroll = ctk.CTkScrollableFrame(
+            main, width=500,
+            label_text="  ⚙️  การตั้งค่า",
+            label_font=ctk.CTkFont(size=13, weight="bold"),
+            fg_color="#0d1117",
+        )
+        left_scroll.grid(row=0, column=0, sticky="nsew", padx=(8, 4), pady=8)
+        left_scroll.grid_columnconfigure(0, weight=1)
+
+        # ── Section 1: Credentials ────────────────────────────────────────
+        s1 = self._section_card(left_scroll, "🔐  Facebook Credentials")
+        r1 = ctk.CTkFrame(s1, fg_color="transparent")
+        r1.pack(fill="x", padx=12, pady=(0, 12))
+        r1.grid_columnconfigure((0, 1), weight=1)
+
+        ctk.CTkLabel(r1, text="Email", font=ctk.CTkFont(size=11, weight="bold")).grid(
+            row=0, column=0, sticky="w", pady=(0, 2))
+        ctk.CTkLabel(r1, text="Password", font=ctk.CTkFont(size=11, weight="bold")).grid(
+            row=0, column=1, sticky="w", padx=(8, 0), pady=(0, 2))
+
         self.email_var = ctk.StringVar()
         ctk.CTkEntry(
-            cred_frame, textvariable=self.email_var,
-            placeholder_text="your@email.com", width=400,
-        ).pack(anchor="w", padx=12, pady=(0, 6))
-        ctk.CTkLabel(cred_frame, text="Password:").pack(anchor="w", padx=12)
+            r1, textvariable=self.email_var, placeholder_text="your@email.com", height=36,
+        ).grid(row=1, column=0, sticky="ew")
+
         self.pass_var = ctk.StringVar()
         ctk.CTkEntry(
-            cred_frame, textvariable=self.pass_var, show="●",
-            placeholder_text="รหัสผ่าน", width=400,
-        ).pack(anchor="w", padx=12, pady=(0, 10))
+            r1, textvariable=self.pass_var, show="●", placeholder_text="รหัสผ่าน", height=36,
+        ).grid(row=1, column=1, sticky="ew", padx=(8, 0))
 
-        # Section 2 — Target
-        target_frame = ctk.CTkFrame(outer)
-        target_frame.pack(fill="x", padx=6, pady=4)
-        self._section_label(target_frame, "🎯 Section 2 — Target Settings")
-        ctk.CTkLabel(target_frame, text="URL เพจเป้าหมาย (แต่ละบรรทัด = 1 เพจ):").pack(anchor="w", padx=12)
-        self.pages_textbox = ctk.CTkTextbox(target_frame, height=100)
-        self.pages_textbox.pack(fill="x", padx=12, pady=(0, 6))
+        # ── Section 2: Target Pages ───────────────────────────────────────
+        s2 = self._section_card(left_scroll, "🎯  Target Pages")
+
+        # header row: label + ชื่อไฟล์ + ปุ่ม save
+        s2_hdr = ctk.CTkFrame(s2, fg_color="transparent")
+        s2_hdr.pack(fill="x", padx=12, pady=(0, 2))
+        s2_hdr.grid_columnconfigure(0, weight=1)
+
+        ctk.CTkLabel(
+            s2_hdr, text="URL เพจเป้าหมาย  (แต่ละบรรทัด = 1 เพจ)",
+            font=ctk.CTkFont(size=11), text_color="gray70",
+        ).grid(row=0, column=0, sticky="w")
+
+        self._pages_file_lbl = ctk.CTkLabel(
+            s2_hdr, text=f"📄 {self.PAGES_FILE}",
+            font=ctk.CTkFont(size=9), text_color="#3d8b3d",
+        )
+        self._pages_file_lbl.grid(row=0, column=1, sticky="e", padx=(4, 0))
+
+        ctk.CTkButton(
+            s2_hdr, text="💾 บันทึกเพจ", width=110, height=28,
+            fg_color="#1565C0", hover_color="#0d47a1",
+            font=ctk.CTkFont(size=11, weight="bold"),
+            command=self._save_pages,
+        ).grid(row=0, column=2, sticky="e", padx=(6, 0))
+
+        self.pages_textbox = ctk.CTkTextbox(s2, height=90, fg_color="#0d1117")
+        self.pages_textbox.pack(fill="x", padx=12, pady=(4, 12))
         self.pages_textbox.insert(
             "1.0",
             "https://www.facebook.com/BBCnewsThai\nhttps://www.facebook.com/voathai",
         )
+
+        # ── Section 3: Keywords ───────────────────────────────────────────
+        s3 = self._section_card(left_scroll, "🔑  Keywords")
+
+        # header row: hint + ชื่อไฟล์ + ปุ่ม save
+        s3_hdr = ctk.CTkFrame(s3, fg_color="transparent")
+        s3_hdr.pack(fill="x", padx=12, pady=(0, 2))
+        s3_hdr.grid_columnconfigure(0, weight=1)
+
         ctk.CTkLabel(
-            target_frame,
-            text="🔑 Keywords — พิมพ์แล้วกด Enter หรือ ＋ | รองรับ #แฮชแท็ก | วางหลายคำคั่น , ได้เลย",
-            font=ctk.CTkFont(size=11),
-        ).pack(anchor="w", padx=12)
+            s3_hdr,
+            text="กด Enter หรือ ＋  |  รองรับ #แฮชแท็ก  |  วางหลายคำคั่น ,",
+            font=ctk.CTkFont(size=10), text_color="gray60",
+        ).grid(row=0, column=0, sticky="w")
+
+        self._kw_file_lbl = ctk.CTkLabel(
+            s3_hdr, text=f"📄 {self.KEYWORDS_FILE}",
+            font=ctk.CTkFont(size=9), text_color="#3d8b3d",
+        )
+        self._kw_file_lbl.grid(row=0, column=1, sticky="e", padx=(4, 0))
+
+        ctk.CTkButton(
+            s3_hdr, text="💾 บันทึก Keywords", width=140, height=28,
+            fg_color="#1565C0", hover_color="#0d47a1",
+            font=ctk.CTkFont(size=11, weight="bold"),
+            command=self._save_keywords,
+        ).grid(row=0, column=2, sticky="e", padx=(6, 0))
+
         self.keywords_widget = KeywordTagInput(
-            target_frame,
+            s3,
             defaults=["เพื่อไทย", "แพทองธาร", "ทักษิณ", "เศรษฐา"],
         )
-        self.keywords_widget.pack(fill="x", padx=8, pady=(0, 10))
+        self.keywords_widget.pack(fill="x", padx=8, pady=(2, 12))
 
-        # Section 3 — Timeframe
-        time_frame = ctk.CTkFrame(outer)
-        time_frame.pack(fill="x", padx=6, pady=4)
-        self._section_label(time_frame, "⏱️ Section 3 — Timeframe & Loop Settings")
-        row3 = ctk.CTkFrame(time_frame, fg_color="transparent")
-        row3.pack(fill="x", padx=12)
-        ctk.CTkLabel(row3, text="ดึงโพสต์ย้อนหลัง (ชั่วโมง):").grid(row=0, column=0, padx=(0, 10), pady=4, sticky="w")
+        # ── Section 4: Timeframe & Loop ───────────────────────────────────
+        s4 = self._section_card(left_scroll, "⏱️  Timeframe & Loop")
+        r4 = ctk.CTkFrame(s4, fg_color="transparent")
+        r4.pack(fill="x", padx=12, pady=(0, 12))
+        r4.grid_columnconfigure((1, 3), weight=0)
+
+        ctk.CTkLabel(r4, text="ดึงย้อนหลัง (ชั่วโมง)", font=ctk.CTkFont(size=11)).grid(
+            row=0, column=0, sticky="w", pady=(0, 2))
         self.hours_var = ctk.StringVar(value="6")
-        ctk.CTkEntry(row3, textvariable=self.hours_var, width=80).grid(row=0, column=1, pady=4, sticky="w")
-        ctk.CTkLabel(row3, text="   วนลูปทุก (นาที):").grid(row=0, column=2, padx=(20, 10), pady=4, sticky="w")
-        self.loop_var = ctk.StringVar(value="30")
-        ctk.CTkEntry(row3, textvariable=self.loop_var, width=80).grid(row=0, column=3, pady=4, sticky="w")
+        ctk.CTkEntry(r4, textvariable=self.hours_var, width=72, height=36).grid(
+            row=1, column=0, sticky="w")
 
-        # Section 4 — Discord
-        discord_frame = ctk.CTkFrame(outer)
-        discord_frame.pack(fill="x", padx=6, pady=4)
-        self._section_label(discord_frame, "💬 Section 4 — Discord Webhook (Optional)")
-        ctk.CTkLabel(discord_frame, text="Webhook URL:").pack(anchor="w", padx=12)
+        ctk.CTkLabel(r4, text="วนลูปทุก (นาที)", font=ctk.CTkFont(size=11)).grid(
+            row=0, column=2, sticky="w", padx=(20, 0), pady=(0, 2))
+        self.loop_var = ctk.StringVar(value="30")
+        ctk.CTkEntry(r4, textvariable=self.loop_var, width=72, height=36).grid(
+            row=1, column=2, sticky="w", padx=(20, 0))
+
+        # ── Section 5: Discord ────────────────────────────────────────────
+        s5 = self._section_card(left_scroll, "💬  Discord Webhook  (Optional)")
+        ctk.CTkLabel(s5, text="Webhook URL", font=ctk.CTkFont(size=11, weight="bold")).pack(
+            anchor="w", padx=12)
         self.webhook_var = ctk.StringVar()
         ctk.CTkEntry(
-            discord_frame, textvariable=self.webhook_var,
-            placeholder_text="https://discord.com/api/webhooks/...", width=560,
-        ).pack(anchor="w", padx=12, pady=(0, 10))
+            s5, textvariable=self.webhook_var,
+            placeholder_text="https://discord.com/api/webhooks/...",
+            height=36,
+        ).pack(fill="x", padx=12, pady=(4, 12))
 
-        # Section 5 — Telegram
-        tg_frame = ctk.CTkFrame(outer)
-        tg_frame.pack(fill="x", padx=6, pady=4)
-        self._section_label(tg_frame, "✈️ Section 5 — Telegram Settings (Optional)")
-        ctk.CTkLabel(tg_frame, text="Bot Token:").pack(anchor="w", padx=12)
+        # ── Section 6: Telegram ───────────────────────────────────────────
+        s6 = self._section_card(left_scroll, "✈️  Telegram Bot  (Optional)")
+        r6 = ctk.CTkFrame(s6, fg_color="transparent")
+        r6.pack(fill="x", padx=12, pady=(0, 12))
+        r6.grid_columnconfigure((0, 1), weight=1)
+
+        ctk.CTkLabel(r6, text="Bot Token", font=ctk.CTkFont(size=11, weight="bold")).grid(
+            row=0, column=0, sticky="w", pady=(0, 2))
+        ctk.CTkLabel(r6, text="Chat ID", font=ctk.CTkFont(size=11, weight="bold")).grid(
+            row=0, column=1, sticky="w", padx=(8, 0), pady=(0, 2))
+
         self.tg_token_var = ctk.StringVar()
         ctk.CTkEntry(
-            tg_frame, textvariable=self.tg_token_var,
-            placeholder_text="123456789:ABCDefghIJKlmNoPQRsTUVwxyZ", width=560,
-        ).pack(anchor="w", padx=12, pady=(0, 6))
-        ctk.CTkLabel(tg_frame, text="Chat ID:").pack(anchor="w", padx=12)
+            r6, textvariable=self.tg_token_var,
+            placeholder_text="123456789:ABCdef...", height=36,
+        ).grid(row=1, column=0, sticky="ew")
+
         self.tg_chatid_var = ctk.StringVar()
         ctk.CTkEntry(
-            tg_frame, textvariable=self.tg_chatid_var,
-            placeholder_text="-100123456789", width=560,
-        ).pack(anchor="w", padx=12, pady=(0, 10))
+            r6, textvariable=self.tg_chatid_var,
+            placeholder_text="-100123456789", height=36,
+        ).grid(row=1, column=1, sticky="ew", padx=(8, 0))
 
-        # Section 6 — Controls
-        ctrl_frame = ctk.CTkFrame(outer)
-        ctrl_frame.pack(fill="x", padx=6, pady=4)
-        self._section_label(ctrl_frame, "🎮 Section 6 — Controls")
-        btn_row = ctk.CTkFrame(ctrl_frame, fg_color="transparent")
-        btn_row.pack(padx=12, pady=(0, 10))
+        # ─── RIGHT PANEL: Log ──────────────────────────────────────────────
+        right = ctk.CTkFrame(main, fg_color="#161b22", corner_radius=10)
+        right.grid(row=0, column=1, sticky="nsew", padx=(4, 8), pady=8)
+        right.grid_columnconfigure(0, weight=1)
+        right.grid_rowconfigure(1, weight=1)
 
-        self.start_btn = ctk.CTkButton(
-            btn_row, text="▶ Start", width=120, height=44,
-            fg_color="#1877F2", hover_color="#145db8",
-            font=ctk.CTkFont(size=14, weight="bold"), command=self._on_start,
-        )
-        self.start_btn.grid(row=0, column=0, padx=6)
+        # log header
+        log_hdr = ctk.CTkFrame(right, fg_color="#21262d", corner_radius=8)
+        log_hdr.grid(row=0, column=0, sticky="ew", padx=10, pady=(10, 4))
+        log_hdr.grid_columnconfigure(0, weight=1)
 
-        self.stop_btn = ctk.CTkButton(
-            btn_row, text="⏹ Stop", width=120, height=44,
-            fg_color="#E53935", hover_color="#b71c1c",
-            font=ctk.CTkFont(size=14, weight="bold"), command=self._on_stop, state="disabled",
-        )
-        self.stop_btn.grid(row=0, column=1, padx=6)
+        ctk.CTkLabel(
+            log_hdr, text="📋  Real-time Activity Log",
+            font=ctk.CTkFont(size=13, weight="bold"), text_color="#c9d1d9",
+        ).grid(row=0, column=0, padx=14, pady=10, sticky="w")
 
-        self.resume_btn = ctk.CTkButton(
-            btn_row, text="▶▶ Resume (แก้ 2FA)", width=160, height=44,
-            fg_color="#FF8F00", hover_color="#e65100",
-            font=ctk.CTkFont(size=13, weight="bold"), command=self._on_resume, state="disabled",
-        )
-        self.resume_btn.grid(row=0, column=2, padx=6)
-
-        self.hide_browser_btn = ctk.CTkButton(
-            btn_row, text="🙈 ซ่อน Browser", width=120, height=44,
-            fg_color="#4A148C", hover_color="#6A1FBF",
-            font=ctk.CTkFont(size=13, weight="bold"), command=self._on_hide_browser, state="disabled",
-        )
-        self.hide_browser_btn.grid(row=0, column=3, padx=6)
-
-        self.save_cfg_btn = ctk.CTkButton(
-            btn_row, text="💾 บันทึกตั้งค่า", width=120, height=44,
-            fg_color="#2E7D32", hover_color="#1B5E20",
-            font=ctk.CTkFont(size=13, weight="bold"), command=self._save_settings,
-        )
-        self.save_cfg_btn.grid(row=0, column=4, padx=6)
-
-        self._hide_hint_lbl = ctk.CTkLabel(
-            ctrl_frame,
-            text="ปุ่มซ่อน Browser จะเปิดใช้งานได้หลังจากบันทึก Cookies สำเร็จ",
-            font=ctk.CTkFont(size=10), text_color="gray50",
-        )
-        self._hide_hint_lbl.pack(pady=(0, 2))
-
-        self.status_lbl = ctk.CTkLabel(
-            ctrl_frame, text="● หยุดทำงาน",
-            text_color="#E53935", font=ctk.CTkFont(size=12, weight="bold"),
-        )
-        self.status_lbl.pack(pady=(0, 8))
-
-        # Section 7 — Log
-        log_frame = ctk.CTkFrame(outer)
-        log_frame.pack(fill="both", expand=True, padx=6, pady=4)
-        self._section_label(log_frame, "📋 Section 7 — Real-time Log")
-        self.log_textbox = ctk.CTkTextbox(
-            log_frame, height=260, state="disabled",
-            font=ctk.CTkFont(family="Courier New", size=11),
-        )
-        self.log_textbox.pack(fill="both", expand=True, padx=12, pady=(0, 10))
         ctk.CTkButton(
-            log_frame, text="🗑 ล้าง Log", width=120, height=28,
-            fg_color="gray30", hover_color="gray20", command=self._clear_log,
-        ).pack(anchor="e", padx=12, pady=(0, 10))
+            log_hdr, text="🗑  ล้าง Log", width=96, height=30,
+            fg_color="#30363d", hover_color="#484f58",
+            font=ctk.CTkFont(size=11),
+            command=self._clear_log,
+        ).grid(row=0, column=1, padx=10, pady=10)
+
+        # log textbox (fills remaining space)
+        self.log_textbox = ctk.CTkTextbox(
+            right, state="disabled",
+            font=ctk.CTkFont(family="Courier New", size=11),
+            fg_color="#0d1117", text_color="#c9d1d9",
+            corner_radius=8,
+        )
+        self.log_textbox.grid(row=1, column=0, sticky="nsew", padx=10, pady=(0, 10))
 
     # ─────────────────────────────────────────────────────────────────────────
     # Settings
     # ─────────────────────────────────────────────────────────────────────────
 
     def _save_settings(self):
+        """บันทึก credentials + webhook + loop  (ไม่รวม pages/keywords)"""
         settings = {
             "email":    self.email_var.get(),
             "password": self.pass_var.get(),
-            "pages":    self.pages_textbox.get("1.0", "end").strip(),
-            "keywords": self.keywords_widget.get_keywords(),
             "hours":    self.hours_var.get(),
             "loop":     self.loop_var.get(),
             "webhook":  self.webhook_var.get(),
@@ -1592,11 +1738,75 @@ class ScraperApp(ctk.CTk):
         try:
             with open(self.SETTINGS_FILE, "w", encoding="utf-8") as f:
                 json.dump(settings, f, ensure_ascii=False, indent=4)
-            self._log("💾 บันทึกการตั้งค่าลงไฟล์เรียบร้อยแล้ว")
+            self._log(f"💾 บันทึก Settings → {self.SETTINGS_FILE}")
         except Exception as e:
-            self._show_error(f"⚠️ เกิดข้อผิดพลาดในการบันทึกการตั้งค่า: {e}")
+            self._show_error(f"⚠️ บันทึก Settings ไม่สำเร็จ: {e}")
+
+    # ── Pages ─────────────────────────────────────────────────────────────────
+
+    def _save_pages(self):
+        """บันทึก Target Pages แยกไฟล์  (แชร์ได้โดยไม่เปิดเผย credentials)"""
+        pages = [u.strip() for u in self.pages_textbox.get("1.0", "end").splitlines() if u.strip()]
+        try:
+            with open(self.PAGES_FILE, "w", encoding="utf-8") as f:
+                json.dump({"pages": pages}, f, ensure_ascii=False, indent=4)
+            self._log(f"💾 บันทึก {len(pages)} เพจ → {self.PAGES_FILE}")
+            self._flash_saved(self._pages_file_lbl, f"✅ บันทึกแล้ว ({len(pages)} เพจ)")
+        except Exception as e:
+            self._show_error(f"⚠️ บันทึกเพจไม่สำเร็จ: {e}")
+
+    def _load_pages(self):
+        """โหลด Target Pages จากไฟล์แยก"""
+        if not os.path.exists(self.PAGES_FILE):
+            return
+        try:
+            with open(self.PAGES_FILE, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            pages = data.get("pages", [])
+            if pages:
+                self.pages_textbox.delete("1.0", "end")
+                self.pages_textbox.insert("1.0", "\n".join(pages))
+            self._log(f"🔄 โหลด {len(pages)} เพจ ← {self.PAGES_FILE}")
+        except Exception as e:
+            self._log(f"⚠️ โหลดเพจไม่สำเร็จ: {e}")
+
+    # ── Keywords ──────────────────────────────────────────────────────────────
+
+    def _save_keywords(self):
+        """บันทึก Keywords แยกไฟล์  (แชร์ได้โดยไม่เปิดเผย credentials)"""
+        kws = self.keywords_widget.get_keywords()
+        try:
+            with open(self.KEYWORDS_FILE, "w", encoding="utf-8") as f:
+                json.dump({"keywords": kws}, f, ensure_ascii=False, indent=4)
+            self._log(f"💾 บันทึก {len(kws)} keywords → {self.KEYWORDS_FILE}")
+            self._flash_saved(self._kw_file_lbl, f"✅ บันทึกแล้ว ({len(kws)} คำ)")
+        except Exception as e:
+            self._show_error(f"⚠️ บันทึก Keywords ไม่สำเร็จ: {e}")
+
+    def _load_keywords(self):
+        """โหลด Keywords จากไฟล์แยก"""
+        if not os.path.exists(self.KEYWORDS_FILE):
+            return
+        try:
+            with open(self.KEYWORDS_FILE, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            kws = data.get("keywords", [])
+            if kws:
+                self.keywords_widget.set_keywords(kws)
+            self._log(f"🔄 โหลด {len(kws)} keywords ← {self.KEYWORDS_FILE}")
+        except Exception as e:
+            self._log(f"⚠️ โหลด Keywords ไม่สำเร็จ: {e}")
+
+    # ── Flash feedback ────────────────────────────────────────────────────────
+
+    def _flash_saved(self, label: ctk.CTkLabel, msg: str, duration_ms: int = 3000):
+        """แสดงข้อความ feedback สีเขียวชั่วคราว แล้วกลับไปชื่อไฟล์เดิม"""
+        original = label.cget("text")
+        label.configure(text=msg, text_color="#4CAF50")
+        self.after(duration_ms, lambda: label.configure(text=original, text_color="#3d8b3d"))
 
     def _load_settings(self):
+        """โหลด credentials + webhook + loop  (pages/keywords โหลดแยกต่างหาก)"""
         if not os.path.exists(self.SETTINGS_FILE):
             return
         try:
@@ -1604,19 +1814,14 @@ class ScraperApp(ctk.CTk):
                 settings = json.load(f)
             self.email_var.set(settings.get("email", ""))
             self.pass_var.set(settings.get("password", ""))
-            pages = settings.get("pages", "")
-            if pages:
-                self.pages_textbox.delete("1.0", "end")
-                self.pages_textbox.insert("1.0", pages)
-            self.keywords_widget.set_keywords(settings.get("keywords", []))
             self.hours_var.set(settings.get("hours", "6"))
             self.loop_var.set(settings.get("loop", "30"))
             self.webhook_var.set(settings.get("webhook", ""))
             self.tg_token_var.set(settings.get("tg_token", ""))
             self.tg_chatid_var.set(settings.get("tg_chatid", ""))
-            self._log("🔄 โหลดการตั้งค่าเดิมเรียบร้อยแล้ว")
+            self._log(f"🔄 โหลด Settings ← {self.SETTINGS_FILE}")
         except Exception as e:
-            self._log(f"⚠️ โหลดการตั้งค่าไม่สำเร็จ: {e}")
+            self._log(f"⚠️ โหลด Settings ไม่สำเร็จ: {e}")
 
     # ─────────────────────────────────────────────────────────────────────────
     # Log
@@ -1693,7 +1898,7 @@ class ScraperApp(ctk.CTk):
         self.start_btn.configure(state="disabled")
         self.stop_btn.configure(state="normal")
         self.resume_btn.configure(state="normal")
-        self.status_lbl.configure(text="● กำลังทำงาน...", text_color="#4CAF50")
+        self.status_lbl.configure(text="⬤  กำลังทำงาน...", text_color="#4CAF50")
 
         self._log(
             f"🚀 เริ่มทำงาน | เพจ: {len(page_urls)} | "
@@ -1764,7 +1969,7 @@ class ScraperApp(ctk.CTk):
         self.start_btn.configure(state="normal")
         self.stop_btn.configure(state="disabled")
         self.resume_btn.configure(state="disabled")
-        self.status_lbl.configure(text="● หยุดทำงาน", text_color="#E53935")
+        self.status_lbl.configure(text="⬤  หยุดทำงาน", text_color="#E53935")
         self.hide_browser_btn.configure(
             state="disabled", text="🙈 ซ่อน Browser", command=self._on_hide_browser
         )
