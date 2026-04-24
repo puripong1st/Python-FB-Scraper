@@ -207,68 +207,56 @@ class DiscordNotifier:
         }
         self._send({"embeds": [embed]})
 
+    # แก้ไข parameter ให้รับ ai_result เข้ามาด้วย
     def send_post(self, page_name: str, page_url: str, post_url: str, content: str,
-                  found_keywords: list, image_url: str = None):
+                  found_keywords: list, image_url: str = None, ai_result: dict = None):
+        
         color = self.PAGE_COLORS.get(page_name, self.DEFAULT_COLOR)
         now   = datetime.now()
 
         content_display = self._smart_truncate(content, 900, post_url)
 
-        if found_keywords:
-            kw_chips = "  ".join(f"`{kw}`" for kw in found_keywords)
-            if len(kw_chips) > 1000:
-                kw_chips = kw_chips[:997] + "…"
-        else:
-            kw_chips = "*—*"
+        # จัดการข้อมูลเดิม
+        kw_chips = "  ".join(f"`{kw}`" for kw in found_keywords) if found_keywords else "*—*"
+        
+        fields = [
+            {"name": "🔗 URL โพสต์", "value": f"[เปิดใน Facebook]({post_url})", "inline": False},
+        ]
 
-        char_count = len(content)
-        char_display = f"`{char_count:,} ตัวอักษร`" if char_count < 5000 else f"`{char_count:,} ตัวอักษร` *(ข้อความยาวมาก)*"
+        # [เพิ่มเข้ามาใหม่] ถ้ามีผลลัพธ์จาก AI ให้แทรกฟิลด์ของ AI ขึ้นมาก่อน
+        if ai_result:
+            score = ai_result.get("score", 0)
+            reason = ai_result.get("reason", "-")
+            persons = ", ".join(ai_result.get("persons", [])) if ai_result.get("persons") else "-"
+            
+            # เปลี่ยนสีแถบข้างตามคะแนนความสำคัญ
+            if score >= 8: color = 0xFF0000  # แดง (สำคัญมาก)
+            elif score >= 5: color = 0xFFA500 # ส้ม
+            
+            fields.extend([
+                {"name": "🤖 AI Score", "value": f"`{score}/10`", "inline": True},
+                {"name": "👤 บุคคลที่พบ", "value": f"`{persons}`", "inline": True},
+                {"name": "💡 สรุปประเด็น (AI)", "value": reason, "inline": False},
+            ])
+
+        # ต่อด้วยข้อมูลเดิม
+        fields.extend([
+            {"name": "🔍 Keywords ที่ตรง", "value": kw_chips, "inline": False},
+            {"name": "🕐 ตรวจพบเมื่อ", "value": f"`{now.strftime('%d/%m/%Y %H:%M:%S')} น.`", "inline": True},
+        ])
 
         embed = {
             "color": color,
-            "author": {
-                "name": f"📰  {page_name}",
-                "url":  page_url,
-            },
-            "title": "📌  คลิกเพื่ออ่านโพสต์ต้นฉบับ  →",
-            "url":   post_url,
+            "author": {"name": f"📰 {page_name}", "url": page_url},
+            "title": "📌 คลิกเพื่ออ่านโพสต์ต้นฉบับ",
+            "url": post_url,
             "description": content_display,
-            "fields": [
-                {
-                    "name":   "🔍  Keywords ที่ตรงกัน",
-                    "value":  kw_chips,
-                    "inline": False,
-                },
-                {
-                    "name":   "📊  จำนวน Keywords ที่ match",
-                    "value":  f"`{len(found_keywords)} คำ`",
-                    "inline": True,
-                },
-                {
-                    "name":   "📝  ความยาวโพสต์",
-                    "value":  char_display,
-                    "inline": True,
-                },
-                {
-                    "name":   "🕐  ตรวจพบเมื่อ",
-                    "value":  f"`{now.strftime('%d/%m/%Y  %H:%M:%S')} น.`",
-                    "inline": True,
-                },
-                {
-                    "name":   "🔗  URL โพสต์",
-                    "value":  f"[เปิดใน Facebook]({post_url})",
-                    "inline": False,
-                },
-            ],
-            "footer": {
-                "text": f"FB News Monitor  •  PRP  •  {page_name}",
-            },
+            "fields": fields,
+            "footer": {"text": f"FB News Monitor • PRP • {page_name}"},
             "timestamp": self._utc_now_iso(),
         }
 
-        if image_url:
-            embed["image"] = {"url": image_url}
-
+        if image_url: embed["image"] = {"url": image_url}
         self._send({"embeds": [embed]})
 
     def send_cycle_complete(self, duration_sec: float, next_run_min: int, total_new: int = 0, pages_count: int = 0):
@@ -663,12 +651,16 @@ class FacebookScraper:
         db: DatabaseManager,
         discord: DiscordNotifier,
         tg: TelegramNotifier,
+        ai_analyzer=None,             # <--- รับค่า
+        sheets_manager=None,
         on_cookies_saved=None,
     ):
         self.log  = log_callback
         self.db   = db
         self.discord = discord
         self.tg   = tg
+        self.ai_analyzer = ai_analyzer         # <--- เซ็ตตัวแปร
+        self.sheets_manager = sheets_manager
         self._on_cookies_saved = on_cookies_saved
 
         # [4] driver ป้องกัน race condition ด้วย RLock + property
@@ -698,35 +690,111 @@ class FacebookScraper:
     # ─────────────────────────────────────────────────────────────────────────
 
     def _start_browser(self):
-        import winreg  # นำเข้าไลบรารีสำหรับอ่านค่าจาก Windows Registry
+        import winreg
+        import os
+        import shutil
+        import subprocess
 
-        options = uc.ChromeOptions()
-        options.add_argument("--no-sandbox")
-        options.add_argument("--disable-dev-shm-usage")
-        options.add_argument("--disable-blink-features=AutomationControlled")
-        options.add_argument("--lang=th-TH,th;q=0.9,en-US;q=0.8")
-        options.add_argument("--window-size=1280,900")
-
-        # ─── ระบบตรวจจับเวอร์ชัน Chrome อัตโนมัติ ───
-        chrome_version = None
+        # ─────────────────────────────────────────────────────────────────
+        # 1. เคลียร์ซากเก่าและแคชอัตโนมัติก่อนเริ่มรอบใหม่
+        # ─────────────────────────────────────────────────────────────────
         try:
-            # ดึงข้อมูลเวอร์ชัน Chrome จาก Registry ของ Windows
-            key = winreg.OpenKey(winreg.HKEY_CURRENT_USER, r"Software\Google\Chrome\BLBeacon")
-            version_str, _ = winreg.QueryValueEx(key, "version")
-            chrome_version = int(version_str.split('.')[0])  # เอาแค่เลขชุดแรก (เช่น 147)
-            self.log(f"🔎 ระบบตรวจพบ Chrome เวอร์ชันหลัก: {chrome_version}")
+            os.system("taskkill /f /im chromedriver.exe /t >nul 2>&1")
+            appdata_path = os.getenv('APPDATA')
+            if appdata_path:
+                uc_cache_dir = os.path.join(appdata_path, 'undetected_chromedriver')
+                if os.path.exists(uc_cache_dir):
+                    shutil.rmtree(uc_cache_dir, ignore_errors=True)
+                    self.log("🧹 ลบโฟลเดอร์แคช Driver เก่าทิ้งแล้ว")
         except Exception as e:
-            self.log(f"⚠️ ไม่สามารถอ่านเวอร์ชัน Chrome จากเครื่องได้: {e}")
+            self.log(f"⚠️ ระบบล้างแคชอัตโนมัติแจ้งเตือน: {e}")
 
-        # สั่งรัน Chrome โดยใส่ version_main ที่ตรวจจับได้ (ถ้าหาไม่เจอจะรันแบบปกติ)
-        if chrome_version:
-            self.driver = uc.Chrome(options=options, use_subprocess=True, version_main=chrome_version)
-        else:
-            self.driver = uc.Chrome(options=options, use_subprocess=True)
+        # ─────────────────────────────────────────────────────────────────
+        # 2. Helper สร้าง ChromeOptions ใหม่เสมอ (แก้บัค reuse object)
+        # ─────────────────────────────────────────────────────────────────
+        def _make_options():
+            opts = uc.ChromeOptions()
+            opts.add_argument("--no-sandbox")
+            opts.add_argument("--disable-dev-shm-usage")
+            opts.add_argument("--disable-blink-features=AutomationControlled")
+            opts.add_argument("--lang=th-TH,th;q=0.9,en-US;q=0.8")
+            opts.add_argument("--window-size=1280,900")
+            opts.page_load_strategy = 'eager'
+            return opts
 
-        self.driver.set_page_load_timeout(30)
+        chrome_version = None
+
+        # ─────────────────────────────────────────────────────────────────
+        # 3. ลำดับที่ 1: อ่านเวอร์ชันจากไฟล์ EXE ตรงๆ (แม่นยำที่สุด)
+        # ─────────────────────────────────────────────────────────────────
+        _ps_commands = [
+            "(Get-Item (Get-Command chrome).Source).VersionInfo.ProductVersion",
+            r"(Get-Item 'C:\Program Files\Google\Chrome\Application\chrome.exe').VersionInfo.ProductVersion",
+            r"(Get-Item 'C:\Program Files (x86)\Google\Chrome\Application\chrome.exe').VersionInfo.ProductVersion",
+            r"(Get-Item ""$env:LOCALAPPDATA\Google\Chrome\Application\chrome.exe"").VersionInfo.ProductVersion",
+        ]
+        for ps_cmd in _ps_commands:
+            try:
+                result = subprocess.run(
+                    ["powershell", "-NoProfile", "-Command", ps_cmd],
+                    capture_output=True, text=True, timeout=8
+                )
+                version_str = result.stdout.strip()
+                if version_str and version_str[0].isdigit():
+                    chrome_version = int(version_str.split('.')[0])
+                    self.log(f"🔎 Chrome เวอร์ชันจริง (EXE): {chrome_version}")
+                    break
+            except Exception:
+                continue
+
+        # ─────────────────────────────────────────────────────────────────
+        # 4. ลำดับที่ 2: ลองหาจาก Registry (ตัวสำรองกรณี PowerShell พัง)
+        # ─────────────────────────────────────────────────────────────────
+        if not chrome_version:
+            registry_keys = [
+                (winreg.HKEY_CURRENT_USER,  r"Software\Google\Chrome\BLBeacon"),
+                (winreg.HKEY_LOCAL_MACHINE, r"SOFTWARE\Google\Chrome\BLBeacon"),
+                (winreg.HKEY_LOCAL_MACHINE, r"SOFTWARE\WOW6432Node\Google\Chrome\BLBeacon"),
+            ]
+            for hive, path in registry_keys:
+                try:
+                    key = winreg.OpenKey(hive, path)
+                    version_str, _ = winreg.QueryValueEx(key, "version")
+                    if version_str:
+                        chrome_version = int(version_str.split('.')[0])
+                        self.log(f"⚠️ ใช้เวอร์ชันจาก Registry (อาจไม่ตรง 100%): {chrome_version}")
+                        break
+                except Exception:
+                    continue
+
+        if not chrome_version:
+            self.log("⚠️ ตรวจไม่พบเวอร์ชัน Chrome — จะปล่อยให้ระบบเดาอัตโนมัติ")
+
+        # ─────────────────────────────────────────────────────────────────
+        # 5. สั่งเปิด Browser พร้อมระบบ Fallback 3 ชั้น
+        # ─────────────────────────────────────────────────────────────────
+        try:
+            # ชั้นที่ 1: เปิดตามเวอร์ชันที่หามาได้อย่างแม่นยำ
+            if chrome_version:
+                self.driver = uc.Chrome(options=_make_options(), use_subprocess=True, version_main=chrome_version)
+            else:
+                self.driver = uc.Chrome(options=_make_options(), use_subprocess=True)
+                
+        except Exception as e:
+            self.log(f"⚠️ โหลด Chrome ปกติล้มเหลว ({e})")
+            self.log("🔄 กำลัง Fallback ลองแบบไม่ระบุเวอร์ชัน...")
+            
+            try:
+                # ชั้นที่ 2: ปล่อยให้ระบบ Auto-detect 
+                self.driver = uc.Chrome(options=_make_options(), use_subprocess=True)
+            except Exception as e2:
+                self.log(f"❌ ระบบ Auto ล้มเหลว... ขอลองไม้ตายสุดท้าย")
+                
+                # ชั้นที่ 3: ไม้ตายสุดท้าย บังคับ 147 (เผื่อฉุกเฉินสำหรับเครื่องคุณ)
+                self.driver = uc.Chrome(options=_make_options(), use_subprocess=True, version_main=147)
+
+        self.driver.set_page_load_timeout(60)
         self.log("🌐 เปิด Browser สำเร็จ")
-
     # ── [1] Cookies: pickle → JSON ────────────────────────────────────────────
 
     def _save_cookies(self):
@@ -1365,8 +1433,10 @@ class FacebookScraper:
                             self.log(f"✅ โพสต์ตรงเงื่อนไข Keyword: {post_url_clean[:70]}")
 
                         # ── ส่ง Notification ──────────────────────────────────
-                        self.discord.send_post(page_name, page_url, post_url_clean, post_text, found_keywords, image_url)
-                        self.tg.send_post(page_name, page_url, post_url_clean, post_text, found_keywords, image_url)
+                        # ── ส่ง Notification ──────────────────────────────────
+                        # [แก้ไข] เพิ่มการส่ง ai_result เข้าไปใน Discord
+                        self.discord.send_post(page_name, page_url, post_url_clean, post_text, found_keywords, image_url, ai_result=ai_result)
+                        self.tg.send_post(page_name, page_url, post_url_clean, post_text, found_keywords, image_url) # Telegram ปล่อยไว้หรือแก้ตามหลักการเดียวกันได้
 
                         self.db.mark_seen(post_id, page_url, post_url_clean)
                         new_posts += 1
@@ -2041,7 +2111,6 @@ class ScraperApp(ctk.CTk):
     # ─────────────────────────────────────────────────────────────────────────
 
     def _save_settings(self):
-        """บันทึก credentials + webhook + loop  (ไม่รวม pages/keywords)"""
         settings = {
             "email":    self.email_var.get(),
             "password": self.pass_var.get(),
@@ -2050,6 +2119,11 @@ class ScraperApp(ctk.CTk):
             "webhook":  self.webhook_var.get(),
             "tg_token": self.tg_token_var.get(),
             "tg_chatid":self.tg_chatid_var.get(),
+            # [เพิ่มเข้ามาใหม่] เซฟค่า AI และ Sheets
+            "claude_key": self.claude_key_var.get(),
+            "sheet_name": self.sheet_name_var.get(),
+            "sa_path":    self.sa_path_var.get(),
+            "ai_prompt":  self.prompt_textbox.get("1.0", "end").strip()
         }
         try:
             with open(self.SETTINGS_FILE, "w", encoding="utf-8") as f:
@@ -2176,7 +2250,6 @@ class ScraperApp(ctk.CTk):
         self.after(duration_ms, lambda: label.configure(text=original, text_color="#3d8b3d"))
 
     def _load_settings(self):
-        """โหลด credentials + webhook + loop  (pages/keywords โหลดแยกต่างหาก)"""
         if not os.path.exists(self.SETTINGS_FILE):
             return
         try:
@@ -2189,6 +2262,17 @@ class ScraperApp(ctk.CTk):
             self.webhook_var.set(settings.get("webhook", ""))
             self.tg_token_var.set(settings.get("tg_token", ""))
             self.tg_chatid_var.set(settings.get("tg_chatid", ""))
+            
+            # [เพิ่มเข้ามาใหม่] โหลดค่า AI และ Sheets
+            self.claude_key_var.set(settings.get("claude_key", ""))
+            self.sheet_name_var.set(settings.get("sheet_name", ""))
+            self.sa_path_var.set(settings.get("sa_path", ""))
+            
+            saved_prompt = settings.get("ai_prompt", "")
+            if saved_prompt:
+                self.prompt_textbox.delete("1.0", "end")
+                self.prompt_textbox.insert("1.0", saved_prompt)
+                
             self._log(f"🔄 โหลด Settings ← {self.SETTINGS_FILE}")
         except Exception as e:
             self._log(f"⚠️ โหลด Settings ไม่สำเร็จ: {e}")
@@ -2260,8 +2344,19 @@ class ScraperApp(ctk.CTk):
         discord  = DiscordNotifier(webhook)
         tg       = TelegramNotifier(tg_token, tg_chatid)
 
+        # [เพิ่มเข้ามาใหม่] สร้าง Instance ของ AI และ Sheets
+        claude_key = self.claude_key_var.get().strip()
+        ai_prompt = self.prompt_textbox.get("1.0", "end").strip()
+        sheet_name = self.sheet_name_var.get().strip()
+        sa_path = self.sa_path_var.get().strip()
+
+        ai_analyzer = ClaudeAnalyzer(claude_key, ai_prompt, self._log) if claude_key else None
+        sheets_manager = GoogleSheetsManager(sa_path, sheet_name, self._log) if sa_path and sheet_name else None
+
         self._scraper = FacebookScraper(
             self._log, self._db, discord, tg,
+            ai_analyzer=ai_analyzer,                 # <--- ส่งเข้าไป
+            sheets_manager=sheets_manager,           # <--- ส่งเข้าไป
             on_cookies_saved=self._enable_hide_btn,
         )
 
