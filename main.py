@@ -39,7 +39,9 @@ from selenium.common.exceptions import (
     WebDriverException,
 )
 import undetected_chromedriver as uc
-
+import anthropic
+import gspread
+from oauth2client.service_account import ServiceAccountCredentials
 
 # ─────────────────────────────────────────────────────────────────────────────
 # DATABASE MANAGER
@@ -184,14 +186,21 @@ class DiscordNotifier:
                 break
         return cut + f"\n\n*[…อ่านต่อในโพสต์ต้นฉบับ]({post_url})*"
 
-    def send_start(self, page_count: int = 0, keyword_count: int = 0, loop_min: int = 0):
+    def send_start(self, page_count: int = 0, keyword_count: int = 0, loop_min: int = 0, hours_back: int = 6):
+        import socket
+        host = socket.gethostname()
+        kw_label = f"`{keyword_count} คำ`" if keyword_count else "`ทั้งหมด (ไม่กรอง)`"
         embed = {
             "color": 0x43A047,
             "author": {"name": "🟢  ระบบ Scraper เริ่มทำงานแล้ว"},
+            "description": f"🖥️  เครื่อง: `{host}`",
             "fields": [
-                {"name": "📋  เพจที่ติดตาม",    "value": f"`{page_count} เพจ`",   "inline": True},
-                {"name": "🔑  Keywords ทั้งหมด", "value": f"`{keyword_count} คำ`", "inline": True},
-                {"name": "🔄  วนซ้ำทุก",         "value": f"`{loop_min} นาที`",    "inline": True},
+                {"name": "📋  เพจที่ติดตาม",      "value": f"`{page_count} เพจ`",        "inline": True},
+                {"name": "🔑  Keywords",            "value": kw_label,                     "inline": True},
+                {"name": "🔄  วนซ้ำทุก",           "value": f"`{loop_min} นาที`",         "inline": True},
+                {"name": "📅  ดึงย้อนหลัง",        "value": f"`{hours_back} ชั่วโมง`",    "inline": True},
+                {"name": "⏰  เวลาเริ่มต้น",        "value": f"`{datetime.now().strftime('%d/%m/%Y %H:%M:%S')}`", "inline": True},
+                {"name": "🔔  ช่องทางแจ้งเตือน",   "value": "`Discord ✅`",               "inline": True},
             ],
             "footer": {"text": "FB News Monitor  •  PRP"},
             "timestamp": self._utc_now_iso(),
@@ -212,17 +221,47 @@ class DiscordNotifier:
         else:
             kw_chips = "*—*"
 
+        char_count = len(content)
+        char_display = f"`{char_count:,} ตัวอักษร`" if char_count < 5000 else f"`{char_count:,} ตัวอักษร` *(ข้อความยาวมาก)*"
+
         embed = {
             "color": color,
-            "author": {"name": f"📰  {page_name}", "url": page_url},
-            "title": "คลิกเพื่ออ่านโพสต์ต้นฉบับ  →",
+            "author": {
+                "name": f"📰  {page_name}",
+                "url":  page_url,
+            },
+            "title": "📌  คลิกเพื่ออ่านโพสต์ต้นฉบับ  →",
             "url":   post_url,
             "description": content_display,
             "fields": [
-                {"name": "🔍  Keywords ที่ตรงกัน", "value": kw_chips, "inline": False},
+                {
+                    "name":   "🔍  Keywords ที่ตรงกัน",
+                    "value":  kw_chips,
+                    "inline": False,
+                },
+                {
+                    "name":   "📊  จำนวน Keywords ที่ match",
+                    "value":  f"`{len(found_keywords)} คำ`",
+                    "inline": True,
+                },
+                {
+                    "name":   "📝  ความยาวโพสต์",
+                    "value":  char_display,
+                    "inline": True,
+                },
+                {
+                    "name":   "🕐  ตรวจพบเมื่อ",
+                    "value":  f"`{now.strftime('%d/%m/%Y  %H:%M:%S')} น.`",
+                    "inline": True,
+                },
+                {
+                    "name":   "🔗  URL โพสต์",
+                    "value":  f"[เปิดใน Facebook]({post_url})",
+                    "inline": False,
+                },
             ],
             "footer": {
-                "text": f"FB News Monitor  •  PRP  •  ตรวจพบ {now.strftime('%d %b %Y  %H:%M')} น.",
+                "text": f"FB News Monitor  •  PRP  •  {page_name}",
             },
             "timestamp": self._utc_now_iso(),
         }
@@ -232,43 +271,67 @@ class DiscordNotifier:
 
         self._send({"embeds": [embed]})
 
-    def send_cycle_complete(self, duration_sec: float, next_run_min: int):
+    def send_cycle_complete(self, duration_sec: float, next_run_min: int, total_new: int = 0, pages_count: int = 0):
         mins = int(duration_sec // 60)
         secs = int(duration_sec % 60)
+        next_time = (datetime.now() + timedelta(minutes=next_run_min)).strftime("%H:%M")
+        posts_val  = f"`{total_new} โพสต์`" if total_new > 0 else "`ไม่มีโพสต์ใหม่`"
+        posts_color = 0x43A047 if total_new > 0 else 0x1E88E5
         embed = {
-            "color": 0x1E88E5,
+            "color": posts_color,
             "author": {"name": "✅  สแกนรอบนี้เสร็จสิ้น"},
             "fields": [
-                {"name": "⏱  เวลาที่ใช้",   "value": f"`{mins} นาที {secs} วินาที`", "inline": True},
-                {"name": "⏳  รอบถัดไปในอีก", "value": f"`{next_run_min} นาที`",      "inline": True},
+                {"name": "🆕  โพสต์ใหม่ที่พบ",    "value": posts_val,                                "inline": True},
+                {"name": "📋  เพจที่สแกน",          "value": f"`{pages_count} เพจ`",                 "inline": True},
+                {"name": "⏱  เวลาที่ใช้",          "value": f"`{mins} นาที {secs} วินาที`",          "inline": True},
+                {"name": "⏳  รอบถัดไปในอีก",       "value": f"`{next_run_min} นาที`",               "inline": True},
+                {"name": "🕐  รอบถัดไปประมาณ",      "value": f"`{next_time} น.`",                    "inline": True},
+                {"name": "📅  วันที่",               "value": f"`{datetime.now().strftime('%d/%m/%Y')}`", "inline": True},
             ],
             "footer": {"text": "FB News Monitor  •  PRP"},
             "timestamp": self._utc_now_iso(),
         }
         self._send({"embeds": [embed]})
 
-    def send_obstacle(self, obstacle_type: str):
+    def send_obstacle(self, obstacle_type: str, page_url: str = ""):
+        page_info = f"\n**เพจที่ติดปัญหา:** {page_url}" if page_url else ""
         embed = {
             "color": 0xE53935,
             "author": {"name": "🚨  บอทหยุดทำงานชั่วคราว — ต้องการความช่วยเหลือ!"},
             "description": (
-                f"**บอทติดหน้า:** `{obstacle_type}`\n\n"
+                f"**บอทติดหน้า:** `{obstacle_type}`{page_info}\n\n"
                 "**วิธีแก้ไข:**\n"
                 "1️⃣  เปิดหน้าต่าง Browser\n"
                 "2️⃣  แก้ไขตามที่หน้าจอแจ้ง\n"
                 "3️⃣  กดปุ่ม **Resume** บนโปรแกรม\n\n"
                 "*บอทจะทำงานต่ออัตโนมัติหลังกด Resume*"
             ),
+            "fields": [
+                {"name": "⏰  เวลาที่เกิดปัญหา", "value": f"`{datetime.now().strftime('%d/%m/%Y %H:%M:%S')} น.`", "inline": True},
+                {"name": "🚫  ประเภทปัญหา",       "value": f"`{obstacle_type}`",                                    "inline": True},
+            ],
             "footer": {"text": "FB News Monitor  •  PRP"},
             "timestamp": self._utc_now_iso(),
         }
         self._send({"content": "@everyone", "embeds": [embed]})
 
-    def send_stopped(self):
+    def send_stopped(self, total_runtime_sec: float = 0, total_posts_found: int = 0):
+        if total_runtime_sec > 0:
+            h = int(total_runtime_sec // 3600)
+            m = int((total_runtime_sec % 3600) // 60)
+            s = int(total_runtime_sec % 60)
+            runtime_str = f"`{h}ชม. {m}นาที {s}วิ`" if h > 0 else f"`{m}นาที {s}วิ`"
+        else:
+            runtime_str = "`-`"
         embed = {
             "color": 0x757575,
             "author": {"name": "🔴  ระบบ Scraper หยุดทำงานแล้ว"},
             "description": "*หยุดโดยผู้ใช้งาน — กด Start เพื่อเริ่มใหม่*",
+            "fields": [
+                {"name": "⏱  รันไปทั้งหมด",        "value": runtime_str,                   "inline": True},
+                {"name": "📰  โพสต์ที่พบทั้งหมด",   "value": f"`{total_posts_found} โพสต์`", "inline": True},
+                {"name": "🕐  หยุดเมื่อ",            "value": f"`{datetime.now().strftime('%d/%m/%Y %H:%M:%S')} น.`", "inline": True},
+            ],
             "footer": {"text": "FB News Monitor  •  PRP"},
             "timestamp": self._utc_now_iso(),
         }
@@ -319,21 +382,35 @@ class TelegramNotifier:
         except requests.RequestException:
             return False
 
-    def send_start(self):
+    def send_start(self, page_count: int = 0, keyword_count: int = 0, loop_min: int = 0, hours_back: int = 6):
+        kw_label = f"{keyword_count} คำ" if keyword_count else "ทั้งหมด (ไม่กรอง)"
         self._send(
-            f"🟢 <b>เริ่มระบบ Scraper</b>\nเวลา: {datetime.now().strftime('%d/%m/%Y %H:%M:%S')}"
+            f"🟢 <b>เริ่มระบบ Scraper แล้ว</b>\n"
+            f"━━━━━━━━━━━━━━━━━━\n"
+            f"📋 เพจที่ติดตาม: <b>{page_count} เพจ</b>\n"
+            f"🔑 Keywords: <b>{kw_label}</b>\n"
+            f"🔄 วนซ้ำทุก: <b>{loop_min} นาที</b>\n"
+            f"📅 ดึงย้อนหลัง: <b>{hours_back} ชั่วโมง</b>\n"
+            f"🔔 ช่องทาง: <b>Telegram ✅</b>\n"
+            f"⏰ เวลาเริ่ม: <b>{datetime.now().strftime('%d/%m/%Y %H:%M:%S')}</b>"
         )
 
     def send_post(self, page_name: str, page_url: str, post_url: str, content: str,
                   found_keywords: list, image_url: str = None):
         kw_str = ", ".join(found_keywords) if found_keywords else "-"
+        kw_count = len(found_keywords)
+        char_count = len(content)
+        detected_at = datetime.now().strftime("%d/%m/%Y %H:%M:%S")
         keyboard = {
             "inline_keyboard": [
                 [
                     {"text": "💾 บันทึกข่าวนี้", "callback_data": "save_news"},
                     {"text": "🗑️ ลบข้อความ",    "callback_data": "delete_news"},
                 ],
-                [{"text": "🌐 ดูข้อมูลเพจเพิ่มเติม", "url": page_url}],
+                [
+                    {"text": "🌐 ดูเพจต้นทาง", "url": page_url},
+                    {"text": "📰 เปิดโพสต์", "url": post_url},
+                ],
             ]
         }
 
@@ -342,9 +419,13 @@ class TelegramNotifier:
                 content[:800] + "\n\n...[อ่านต่อในลิงก์]" if len(content) > 800 else content
             )
             text = (
-                f"📢 <b>ข่าวจาก {page_name}</b>\n\n"
+                f"📢 <b>ข่าวจาก {page_name}</b>\n"
+                f"━━━━━━━━━━━━━━━━━━\n"
                 f"{snippet}\n\n"
-                f"🔑 <b>Keywords:</b> {kw_str}\n\n"
+                f"━━━━━━━━━━━━━━━━━━\n"
+                f"🔑 <b>Keywords ({kw_count} คำ):</b> {kw_str}\n"
+                f"📝 <b>ความยาว:</b> {char_count:,} ตัวอักษร\n"
+                f"🕐 <b>ตรวจพบ:</b> {detected_at} น.\n"
                 f"🔗 <a href='{post_url}'>เปิดโพสต์ต้นฉบับ</a>"
             )
             self._send_photo(image_url, text, keyboard)
@@ -353,31 +434,60 @@ class TelegramNotifier:
                 content[:2000] + "\n\n...[อ่านต่อในลิงก์]" if len(content) > 2000 else content
             )
             text = (
-                f"📢 <b>ข่าวจาก {page_name}</b>\n\n"
+                f"📢 <b>ข่าวจาก {page_name}</b>\n"
+                f"━━━━━━━━━━━━━━━━━━\n"
                 f"{snippet}\n\n"
-                f"🔑 <b>Keywords:</b> {kw_str}\n\n"
+                f"━━━━━━━━━━━━━━━━━━\n"
+                f"🔑 <b>Keywords ({kw_count} คำ):</b> {kw_str}\n"
+                f"📝 <b>ความยาว:</b> {char_count:,} ตัวอักษร\n"
+                f"🕐 <b>ตรวจพบ:</b> {detected_at} น.\n"
                 f"🔗 <a href='{post_url}'>เปิดโพสต์ต้นฉบับ</a>"
             )
             self._send(text, keyboard)
 
-    def send_cycle_complete(self, duration_sec: float, next_run_min: int):
+    def send_cycle_complete(self, duration_sec: float, next_run_min: int, total_new: int = 0, pages_count: int = 0):
         mins = int(duration_sec // 60)
         secs = int(duration_sec % 60)
+        next_time = (datetime.now() + timedelta(minutes=next_run_min)).strftime("%H:%M")
+        posts_line = f"🆕 โพสต์ใหม่: <b>{total_new} โพสต์</b>" if total_new > 0 else "🆕 โพสต์ใหม่: <b>ไม่มีโพสต์ใหม่</b>"
         self._send(
             f"✅ <b>สแกนรอบนี้เสร็จสิ้น</b>\n"
-            f"ระยะเวลาที่ใช้: {mins}m {secs}s\n"
-            f"รอทำงานรอบต่อไปในอีก {next_run_min} นาที"
+            f"━━━━━━━━━━━━━━━━━━\n"
+            f"{posts_line}\n"
+            f"📋 เพจที่สแกน: <b>{pages_count} เพจ</b>\n"
+            f"⏱ ระยะเวลา: <b>{mins}m {secs}s</b>\n"
+            f"⏳ รอบถัดไปในอีก: <b>{next_run_min} นาที</b>\n"
+            f"🕐 ประมาณ: <b>{next_time} น.</b>"
         )
 
-    def send_obstacle(self, obstacle_type: str):
+    def send_obstacle(self, obstacle_type: str, page_url: str = ""):
+        page_line = f"\n🌐 เพจที่ติดปัญหา: {page_url}" if page_url else ""
         self._send(
             f"🚨 <b>บอทติดหน้า {obstacle_type}</b>\n"
-            f"กรุณาเข้ามากดแก้ในเบราว์เซอร์ด่วน!\n"
-            f"แล้วกดปุ่ม <b>Resume</b> บนโปรแกรม"
+            f"━━━━━━━━━━━━━━━━━━\n"
+            f"⏰ เวลา: <b>{datetime.now().strftime('%d/%m/%Y %H:%M:%S')} น.</b>{page_line}\n\n"
+            f"📌 <b>วิธีแก้ไข:</b>\n"
+            f"1️⃣ เปิดหน้าต่าง Browser\n"
+            f"2️⃣ แก้ไขตามที่หน้าจอแจ้ง\n"
+            f"3️⃣ กดปุ่ม <b>Resume</b> บนโปรแกรม"
         )
 
-    def send_stopped(self):
-        self._send("🔴 <b>ระบบ Scraper หยุดทำงานแล้ว</b> (หยุดโดยผู้ใช้)")
+    def send_stopped(self, total_runtime_sec: float = 0, total_posts_found: int = 0):
+        if total_runtime_sec > 0:
+            h = int(total_runtime_sec // 3600)
+            m = int((total_runtime_sec % 3600) // 60)
+            s = int(total_runtime_sec % 60)
+            runtime_str = f"{h}ชม. {m}นาที {s}วิ" if h > 0 else f"{m}นาที {s}วิ"
+        else:
+            runtime_str = "-"
+        self._send(
+            f"🔴 <b>ระบบ Scraper หยุดทำงานแล้ว</b>\n"
+            f"━━━━━━━━━━━━━━━━━━\n"
+            f"⏱ รันไปทั้งหมด: <b>{runtime_str}</b>\n"
+            f"📰 โพสต์ที่พบทั้งหมด: <b>{total_posts_found} โพสต์</b>\n"
+            f"🕐 หยุดเมื่อ: <b>{datetime.now().strftime('%d/%m/%Y %H:%M:%S')} น.</b>\n"
+            f"<i>หยุดโดยผู้ใช้งาน — กด Start เพื่อเริ่มใหม่</i>"
+        )
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -454,7 +564,81 @@ class TelegramListener(threading.Thread):
     def stop(self):
         self._stop_event.set()
 
+class ClaudeAnalyzer:
+    def __init__(self, api_key: str, system_prompt: str, log_callback):
+        self.api_key = api_key
+        self.system_prompt = system_prompt
+        self.log = log_callback
+        self.client = anthropic.Anthropic(api_key=api_key) if api_key else None
 
+    def analyze(self, post_text: str) -> dict:
+        if not self.client:
+            return None
+        
+        prompt = f"""{self.system_prompt}
+
+ข้อความข่าว:
+{post_text}
+"""
+        try:
+            response = self.client.messages.create(
+                model="claude-3-5-sonnet-20240620",
+                max_tokens=800,
+                temperature=0.1,
+                messages=[
+                    {"role": "user", "content": prompt},
+                    {"role": "assistant", "content": "{"} # บังคับให้เริ่มตอบด้วย JSON ทันที
+                ]
+            )
+            result_text = "{" + response.content[0].text
+            
+            # ล้างโค้ด markdown เผื่อ AI ตอบกลับมาติด ```json
+            match = re.search(r'\{.*\}', result_text, re.DOTALL)
+            if match:
+                return json.loads(match.group(0))
+            return json.loads(result_text)
+        except Exception as e:
+            self.log(f"❌ AI Analysis Error: {e}")
+            return None
+
+# ─────────────────────────────────────────────────────────────────────────────
+# GOOGLE SHEETS MANAGER
+# ─────────────────────────────────────────────────────────────────────────────
+class GoogleSheetsManager:
+    def __init__(self, creds_path: str, sheet_name: str, log_callback):
+        self.log = log_callback
+        self.sheet = None
+        
+        if not creds_path or not sheet_name or not os.path.exists(creds_path):
+            return
+
+        try:
+            scope = ["[https://spreadsheets.google.com/feeds](https://spreadsheets.google.com/feeds)", "[https://www.googleapis.com/auth/drive](https://www.googleapis.com/auth/drive)"]
+            creds = ServiceAccountCredentials.from_json_keyfile_name(creds_path, scope)
+            client = gspread.authorize(creds)
+            self.sheet = client.open(sheet_name).sheet1
+            self.log("✅ เชื่อมต่อ Google Sheets สำเร็จ")
+        except Exception as e:
+            self.log(f"❌ Google Sheets Connection Error: {e}")
+
+    def upload_news(self, page_name, post_url, post_text, persons, score, reason):
+        if not self.sheet:
+            return False
+        try:
+            # ลำดับข้อมูลตามที่ต้องการ
+            row_data = [
+                page_name,                  # 1. ชื่อเพจ
+                post_url,                   # 2. ลิ้งข่าว
+                post_text,                  # 3. เนื้อหาข่าว
+                ", ".join(persons),         # 4. คนที่ถูกระบุ
+                score,                      # 5. ความเกี่ยวข้อง
+                reason                      # 6. เหตุผลของ AI
+            ]
+            self.sheet.append_row(row_data)
+            return True
+        except Exception as e:
+            self.log(f"❌ อัปโหลดลง Google Sheets ไม่สำเร็จ: {e}")
+            return False
 # ─────────────────────────────────────────────────────────────────────────────
 # FACEBOOK SCRAPER
 # ─────────────────────────────────────────────────────────────────────────────
@@ -514,13 +698,32 @@ class FacebookScraper:
     # ─────────────────────────────────────────────────────────────────────────
 
     def _start_browser(self):
+        import winreg  # นำเข้าไลบรารีสำหรับอ่านค่าจาก Windows Registry
+
         options = uc.ChromeOptions()
         options.add_argument("--no-sandbox")
         options.add_argument("--disable-dev-shm-usage")
         options.add_argument("--disable-blink-features=AutomationControlled")
         options.add_argument("--lang=th-TH,th;q=0.9,en-US;q=0.8")
         options.add_argument("--window-size=1280,900")
-        self.driver = uc.Chrome(options=options, use_subprocess=True)  # ใช้ setter
+
+        # ─── ระบบตรวจจับเวอร์ชัน Chrome อัตโนมัติ ───
+        chrome_version = None
+        try:
+            # ดึงข้อมูลเวอร์ชัน Chrome จาก Registry ของ Windows
+            key = winreg.OpenKey(winreg.HKEY_CURRENT_USER, r"Software\Google\Chrome\BLBeacon")
+            version_str, _ = winreg.QueryValueEx(key, "version")
+            chrome_version = int(version_str.split('.')[0])  # เอาแค่เลขชุดแรก (เช่น 147)
+            self.log(f"🔎 ระบบตรวจพบ Chrome เวอร์ชันหลัก: {chrome_version}")
+        except Exception as e:
+            self.log(f"⚠️ ไม่สามารถอ่านเวอร์ชัน Chrome จากเครื่องได้: {e}")
+
+        # สั่งรัน Chrome โดยใส่ version_main ที่ตรวจจับได้ (ถ้าหาไม่เจอจะรันแบบปกติ)
+        if chrome_version:
+            self.driver = uc.Chrome(options=options, use_subprocess=True, version_main=chrome_version)
+        else:
+            self.driver = uc.Chrome(options=options, use_subprocess=True)
+
         self.driver.set_page_load_timeout(30)
         self.log("🌐 เปิด Browser สำเร็จ")
 
@@ -649,7 +852,7 @@ class FacebookScraper:
             clicked = self._click_login_button()
             if not clicked:
                 self.log("⚠️ หาปุ่ม Login ไม่เจอ — กรุณากด Login ใน Browser ด้วยตัวเอง แล้วกด Resume")
-                self._handle_obstacle("Login Button Not Found — กรุณากด Login ด้วยตัวเอง")
+                self._handle_obstacle("Login Button Not Found — กรุณากด Login ด้วยตัวเอง", f"{self.HOME_URL}/login")
                 if self._stop_event.is_set():
                     return False
 
@@ -659,7 +862,7 @@ class FacebookScraper:
             obstacle = self._detect_obstacle()
             if obstacle:
                 self.log(f"⚠️ ติด {obstacle} หลังล็อกอิน")
-                self._handle_obstacle(obstacle)
+                self._handle_obstacle(obstacle, f"{self.HOME_URL}/login")
                 if self._stop_event.is_set():
                     return False
                 time.sleep(2)
@@ -672,7 +875,7 @@ class FacebookScraper:
 
             self.log("⚠️ ยังอยู่หน้า Login — อาจ Email/Password ผิด หรือมี CAPTCHA ที่มองไม่เห็น")
             self.log("👉 กรุณาล็อกอินด้วยตัวเองในหน้าต่าง Browser แล้วกด Resume")
-            self._handle_obstacle("Login ไม่สำเร็จ — กรุณาล็อกอินด้วยตัวเอง")
+            self._handle_obstacle("Login ไม่สำเร็จ — กรุณาล็อกอินด้วยตัวเอง", f"{self.HOME_URL}/login")
             if self._stop_event.is_set():
                 return False
             time.sleep(2)
@@ -684,7 +887,7 @@ class FacebookScraper:
 
         except TimeoutException:
             self.log("⚠️ Timeout ระหว่าง Login — กรุณาล็อกอินด้วยตัวเองใน Browser แล้วกด Resume")
-            self._handle_obstacle("Timeout — กรุณาล็อกอินด้วยตัวเอง")
+            self._handle_obstacle("Timeout — กรุณาล็อกอินด้วยตัวเอง", f"{self.HOME_URL}/login")
             if self._stop_event.is_set():
                 return False
             time.sleep(2)
@@ -789,10 +992,10 @@ class FacebookScraper:
             self.log(f"⚠️ _detect_obstacle identity check: {e}")
         return None
 
-    def _handle_obstacle(self, obstacle_type: str):
+    def _handle_obstacle(self, obstacle_type: str, page_url: str = ""):
         self.log(f"🚨 ติด {obstacle_type} — หยุดรอผู้ใช้แก้ไข กด Resume เมื่อเสร็จ")
-        self.discord.send_obstacle(obstacle_type)
-        self.tg.send_obstacle(obstacle_type)
+        self.discord.send_obstacle(obstacle_type, page_url)
+        self.tg.send_obstacle(obstacle_type, page_url)
         self._resume_event.clear()
         self._is_paused = True
         self._resume_event.wait()
@@ -959,7 +1162,7 @@ class FacebookScraper:
 
             obstacle = self._detect_obstacle()
             if obstacle:
-                self._handle_obstacle(obstacle)
+                self._handle_obstacle(obstacle, page_url)
                 if self._stop_event.is_set():
                     return 0
 
@@ -1116,15 +1319,50 @@ class FacebookScraper:
                         image_url = data.get("imageUrl") or None
 
                         # ── ตรวจ Keywords ─────────────────────────────────────
+                        # ── ตรวจ Keywords + AI ─────────────────────────────────────
+                        # 1. กรองหยาบด้วย Keyword ก่อน (ถ้ามี) เพื่อประหยัด API
                         found_keywords = []
                         if keywords:
                             for kw in keywords:
                                 if kw.lower().strip() in post_text.lower():
                                     found_keywords.append(kw.strip())
+                            
+                            # ถ้าเซ็ต Keyword ไว้ แต่หาไม่เจอเลย ให้ข้ามไปเลย ไม่ต้องส่งให้ AI ประมวลผล
                             if not found_keywords:
                                 continue
 
-                        self.log(f"✅ โพสต์ตรงเงื่อนไข: {post_url_clean[:70]}")
+                        self.log(f"🔎 พบเงื่อนไขเบื้องต้น ส่งให้ AI วิเคราะห์: {post_url_clean[:50]}...")
+
+                        # 2. ส่งให้ AI วิเคราะห์
+                        ai_result = None
+                        if hasattr(self, 'ai_analyzer') and self.ai_analyzer:
+                            ai_result = self.ai_analyzer.analyze(post_text)
+
+                        # ถ้ามี AI ให้ใช้เงื่อนไข AI เป็นหลัก
+                        if ai_result:
+                            is_target = ai_result.get("is_target", False)
+                            score = ai_result.get("score", 0)
+                            
+                            if is_target and score >= 6:  # กำหนดเกณฑ์คะแนนขั้นต่ำ (ปรับได้)
+                                self.log(f"🎯 [AI PASS] คะแนน: {score}/10 | เหตุผล: {ai_result.get('reason')}")
+                                
+                                # 3. อัปโหลดขึ้น Google Sheets
+                                if hasattr(self, 'sheets_manager') and self.sheets_manager:
+                                    self.sheets_manager.upload_news(
+                                        page_name=page_name,
+                                        post_url=post_url_clean,
+                                        post_text=post_text,
+                                        persons=ai_result.get("persons", []),
+                                        score=score,
+                                        reason=ai_result.get("reason", "")
+                                    )
+                                    self.log("💾 บันทึกลง Google Sheets เรียบร้อย")
+                            else:
+                                self.log(f"⏩ [AI REJECT] AI มองว่าไม่เกี่ยวข้อง (Score: {score})")
+                                continue # ข้ามโพสต์นี้ไป ไม่ต้องส่งแจ้งเตือน
+                        else:
+                            # ถ้าไม่ได้ตั้งค่า AI ไว้ ก็ใช้ลอจิก Keyword ธรรมดา
+                            self.log(f"✅ โพสต์ตรงเงื่อนไข Keyword: {post_url_clean[:70]}")
 
                         # ── ส่ง Notification ──────────────────────────────────
                         self.discord.send_post(page_name, page_url, post_url_clean, post_text, found_keywords, image_url)
@@ -1132,8 +1370,8 @@ class FacebookScraper:
 
                         self.db.mark_seen(post_id, page_url, post_url_clean)
                         new_posts += 1
-                        time.sleep(0.5)
-
+                        time.sleep(1) # หน่วงเวลาสักนิดหลังส่ง API
+                        
                     except StaleElementReferenceException:
                         continue
                     except Exception as e:
@@ -1171,10 +1409,12 @@ class FacebookScraper:
 
         try:
             # แจ้งเตือนแค่ครั้งเดียวตอนกดปุ่ม Start
-            self.discord.send_start(len(page_urls), len(keywords), loop_minutes)
-            self.tg.send_start()
+            self.discord.send_start(len(page_urls), len(keywords), loop_minutes, hours_back)
+            self.tg.send_start(len(page_urls), len(keywords), loop_minutes, hours_back)
             _started_successfully = True
             last_cleanup_date = None
+            _session_start = time.time()
+            _total_posts_all_cycles = 0
 
             while not self._stop_event.is_set():
                 now = datetime.now()
@@ -1216,11 +1456,13 @@ class FacebookScraper:
                 if self._stop_event.is_set():
                     break
 
+                _total_posts_all_cycles += total_new
+
                 # 3. สแกนจบ ส่งแจ้งเตือนสรุปผล
                 duration = time.time() - cycle_start
                 self.log(f"✅ รอบสแกนเสร็จ | พบโพสต์ใหม่รวม: {total_new}")
-                self.discord.send_cycle_complete(duration, loop_minutes)
-                self.tg.send_cycle_complete(duration, loop_minutes)
+                self.discord.send_cycle_complete(duration, loop_minutes, total_new, len(page_urls))
+                self.tg.send_cycle_complete(duration, loop_minutes, total_new, len(page_urls))
 
                 # 4. ปิด BROWSER ทิ้งทันทีหลังส่งแจ้งเตือนเสร็จ
                 self.log("🛑 ปิด Browser ชั่วคราวเพื่อประหยัดทรัพยากรระหว่างรอรอบถัดไป...")
@@ -1251,8 +1493,9 @@ class FacebookScraper:
             self.log(f"❌ Fatal Error ใน Scraper Thread: {e}")
         finally:
             if _started_successfully:
-                self.discord.send_stopped()
-                self.tg.send_stopped()
+                total_runtime = time.time() - _session_start
+                self.discord.send_stopped(total_runtime, _total_posts_all_cycles)
+                self.tg.send_stopped(total_runtime, _total_posts_all_cycles)
 
             # ปิด Browser ชัวร์ๆ อีกครั้งถ้าเกิด Error หลุดลูปมา
             if self.driver:
@@ -1419,12 +1662,15 @@ class ScraperApp(ctk.CTk):
         self._scraper: FacebookScraper | None  = None
         self._scraper_thread: threading.Thread | None = None
         self._log_queue: Queue                 = Queue()
+        self._session_start_time: float | None = None
+        self._session_posts_found: int         = 0
 
         self._build_ui()
         self._load_settings()
         self._load_pages()
         self._load_keywords()
         self._poll_log_queue()
+        self._update_timer()
 
     def _section_card(self, parent, title: str) -> ctk.CTkFrame:
         """สร้าง card section พร้อม title สีฟ้า สำหรับ sidebar"""
@@ -1512,7 +1758,7 @@ class ScraperApp(ctk.CTk):
         # ══════════════════════════════════════════════════════════════════
         # STATUS BAR — แถบสถานะบางๆ ใต้ header
         # ══════════════════════════════════════════════════════════════════
-        status_bar = ctk.CTkFrame(self, fg_color="#161b22", height=32, corner_radius=0)
+        status_bar = ctk.CTkFrame(self, fg_color="#161b22", height=36, corner_radius=0)
         status_bar.grid(row=1, column=0, sticky="ew")
         status_bar.grid_propagate(False)
         status_bar.grid_columnconfigure(1, weight=1)
@@ -1521,14 +1767,24 @@ class ScraperApp(ctk.CTk):
             status_bar, text="⬤  หยุดทำงาน",
             text_color="#E53935", font=ctk.CTkFont(size=12, weight="bold"),
         )
-        self.status_lbl.grid(row=0, column=0, padx=16, pady=4, sticky="w")
+        self.status_lbl.grid(row=0, column=0, padx=16, pady=6, sticky="w")
+
+        # stats chips
+        stats_frame = ctk.CTkFrame(status_bar, fg_color="transparent")
+        stats_frame.grid(row=0, column=1, padx=8, pady=4, sticky="w")
+
+        self._timer_lbl = ctk.CTkLabel(
+            stats_frame, text="⏱ 00:00:00",
+            font=ctk.CTkFont(size=10), text_color="#7d9ec0",
+        )
+        self._timer_lbl.pack(side="left", padx=(0, 14))
 
         self._hide_hint_lbl = ctk.CTkLabel(
-            status_bar,
+            stats_frame,
             text="💡 ปุ่มซ่อน Browser จะเปิดใช้ได้หลัง Cookies บันทึกสำเร็จ",
             font=ctk.CTkFont(size=10), text_color="gray50",
         )
-        self._hide_hint_lbl.grid(row=0, column=1, padx=8, pady=4, sticky="w")
+        self._hide_hint_lbl.pack(side="left")
 
         # ══════════════════════════════════════════════════════════════════
         # MAIN 2-COLUMN CONTENT AREA
@@ -1656,8 +1912,17 @@ class ScraperApp(ctk.CTk):
 
         # ── Section 5: Discord ────────────────────────────────────────────
         s5 = self._section_card(left_scroll, "💬  Discord Webhook  (Optional)")
-        ctk.CTkLabel(s5, text="Webhook URL", font=ctk.CTkFont(size=11, weight="bold")).pack(
-            anchor="w", padx=12)
+        s5_hdr = ctk.CTkFrame(s5, fg_color="transparent")
+        s5_hdr.pack(fill="x", padx=12)
+        s5_hdr.grid_columnconfigure(0, weight=1)
+        ctk.CTkLabel(s5_hdr, text="Webhook URL", font=ctk.CTkFont(size=11, weight="bold")).grid(
+            row=0, column=0, sticky="w")
+        ctk.CTkButton(
+            s5_hdr, text="🧪 ทดสอบ", width=90, height=26,
+            fg_color="#37474F", hover_color="#546E7A",
+            font=ctk.CTkFont(size=10, weight="bold"),
+            command=self._test_discord,
+        ).grid(row=0, column=1, sticky="e")
         self.webhook_var = ctk.StringVar()
         ctk.CTkEntry(
             s5, textvariable=self.webhook_var,
@@ -1667,8 +1932,19 @@ class ScraperApp(ctk.CTk):
 
         # ── Section 6: Telegram ───────────────────────────────────────────
         s6 = self._section_card(left_scroll, "✈️  Telegram Bot  (Optional)")
+        s6_hdr = ctk.CTkFrame(s6, fg_color="transparent")
+        s6_hdr.pack(fill="x", padx=12)
+        s6_hdr.grid_columnconfigure(0, weight=1)
+        ctk.CTkLabel(s6_hdr, text="Bot Token & Chat ID", font=ctk.CTkFont(size=11, weight="bold")).grid(
+            row=0, column=0, sticky="w")
+        ctk.CTkButton(
+            s6_hdr, text="🧪 ทดสอบ", width=90, height=26,
+            fg_color="#37474F", hover_color="#546E7A",
+            font=ctk.CTkFont(size=10, weight="bold"),
+            command=self._test_telegram,
+        ).grid(row=0, column=1, sticky="e")
         r6 = ctk.CTkFrame(s6, fg_color="transparent")
-        r6.pack(fill="x", padx=12, pady=(0, 12))
+        r6.pack(fill="x", padx=12, pady=(4, 12))
         r6.grid_columnconfigure((0, 1), weight=1)
 
         ctk.CTkLabel(r6, text="Bot Token", font=ctk.CTkFont(size=11, weight="bold")).grid(
@@ -1687,6 +1963,46 @@ class ScraperApp(ctk.CTk):
             r6, textvariable=self.tg_chatid_var,
             placeholder_text="-100123456789", height=36,
         ).grid(row=1, column=1, sticky="ew", padx=(8, 0))
+
+        # ── Section 7: AI & Google Sheets ───────────────────────────────────
+        s7 = self._section_card(left_scroll, "🤖  AI Analysis & Google Sheets")
+        
+        r7_1 = ctk.CTkFrame(s7, fg_color="transparent")
+        r7_1.pack(fill="x", padx=12, pady=(0, 6))
+        r7_1.grid_columnconfigure((0, 1), weight=1)
+
+        ctk.CTkLabel(r7_1, text="Claude API Key", font=ctk.CTkFont(size=11, weight="bold")).grid(row=0, column=0, sticky="w")
+        ctk.CTkLabel(r7_1, text="ชื่อ Google Sheet", font=ctk.CTkFont(size=11, weight="bold")).grid(row=0, column=1, sticky="w", padx=(8, 0))
+
+        self.claude_key_var = ctk.StringVar()
+        ctk.CTkEntry(r7_1, textvariable=self.claude_key_var, show="●", placeholder_text="sk-ant-...", height=36).grid(row=1, column=0, sticky="ew")
+
+        self.sheet_name_var = ctk.StringVar()
+        ctk.CTkEntry(r7_1, textvariable=self.sheet_name_var, placeholder_text="ชื่อไฟล์ใน Google Drive", height=36).grid(row=1, column=1, sticky="ew", padx=(8, 0))
+
+        r7_2 = ctk.CTkFrame(s7, fg_color="transparent")
+        r7_2.pack(fill="x", padx=12, pady=(0, 6))
+        r7_2.grid_columnconfigure(0, weight=1)
+        
+        ctk.CTkLabel(r7_2, text="Path ไฟล์ Service Account (.json)", font=ctk.CTkFont(size=11, weight="bold")).grid(row=0, column=0, sticky="w")
+        self.sa_path_var = ctk.StringVar()
+        ctk.CTkEntry(r7_2, textvariable=self.sa_path_var, placeholder_text="C:/path/to/credentials.json", height=36).grid(row=1, column=0, sticky="ew")
+
+        ctk.CTkLabel(s7, text="AI Prompt (คำสั่งให้ Claude ทำงาน)", font=ctk.CTkFont(size=11, weight="bold")).pack(anchor="w", padx=12, pady=(6, 2))
+        
+        # กล่องใส่ Prompt
+        self.prompt_textbox = ctk.CTkTextbox(s7, height=180, fg_color="#1a1a2e", font=ctk.CTkFont(size=11))
+        self.prompt_textbox.pack(fill="x", padx=12, pady=(0, 12))
+        
+        default_prompt = """คุณคือผู้ช่วยบรรณาธิการข่าวการเมืองไทย จงวิเคราะห์ข่าวต่อไปนี้ว่าเกี่ยวข้องกับ "พรรคเพื่อไทย" หรือไม่ (รวมถึงการโจมตีจากพรรคคู่แข่ง หรือกล่าวถึงบุคคลในเครือข่าย เช่น ทักษิณ, แพทองธาร, เศรษฐา)
+จงตอบกลับมาเป็นรูปแบบ JSON เท่านั้น ห้ามมีข้อความอื่นปะปน โครงสร้างดังนี้:
+{
+  "is_target": true หรือ false,
+  "score": ให้คะแนน 1-10 (10 คือเกี่ยวข้องโดยตรง),
+  "persons": ["ชื่อบุคคลที่ 1", "ชื่อบุคคลที่ 2"],
+  "reason": "สรุปเหตุผลสั้นๆ ไม่เกิน 2 บรรทัด ว่าทำไมข่าวนี้ถึงเกี่ยวข้อง"
+}"""
+        self.prompt_textbox.insert("1.0", default_prompt)
 
         # ─── RIGHT PANEL: Log ──────────────────────────────────────────────
         right = ctk.CTkFrame(main, fg_color="#161b22", corner_radius=10)
@@ -1799,6 +2115,60 @@ class ScraperApp(ctk.CTk):
 
     # ── Flash feedback ────────────────────────────────────────────────────────
 
+    def _update_timer(self):
+        """อัปเดตตัวนับเวลา session ทุก 1 วินาที"""
+        if self._session_start_time is not None:
+            elapsed = int(time.time() - self._session_start_time)
+            h = elapsed // 3600
+            m = (elapsed % 3600) // 60
+            s = elapsed % 60
+            self._timer_lbl.configure(
+                text=f"⏱ {h:02d}:{m:02d}:{s:02d}",
+                text_color="#4CAF50",
+            )
+        else:
+            self._timer_lbl.configure(text="⏱ 00:00:00", text_color="#7d9ec0")
+        self.after(1000, self._update_timer)
+
+    def _test_discord(self):
+        webhook = self.webhook_var.get().strip()
+        if not webhook:
+            self._show_error("⚠️ กรุณากรอก Webhook URL ก่อนทดสอบ")
+            return
+        def _do_test():
+            try:
+                d = DiscordNotifier(webhook)
+                d.send_start(
+                    page_count=len([u for u in self.pages_textbox.get("1.0","end").splitlines() if u.strip()]),
+                    keyword_count=len(self.keywords_widget.get_keywords()),
+                    loop_min=int(self.loop_var.get() or "30"),
+                    hours_back=int(self.hours_var.get() or "6"),
+                )
+                self._log("✅ ส่ง Test Discord สำเร็จ — ตรวจสอบใน Discord Channel")
+            except Exception as e:
+                self._log(f"❌ Test Discord ล้มเหลว: {e}")
+        threading.Thread(target=_do_test, daemon=True).start()
+
+    def _test_telegram(self):
+        tg_token  = self.tg_token_var.get().strip()
+        tg_chatid = self.tg_chatid_var.get().strip()
+        if not tg_token or not tg_chatid:
+            self._show_error("⚠️ กรุณากรอก Bot Token และ Chat ID ก่อนทดสอบ")
+            return
+        def _do_test():
+            try:
+                tg = TelegramNotifier(tg_token, tg_chatid)
+                tg.send_start(
+                    page_count=len([u for u in self.pages_textbox.get("1.0","end").splitlines() if u.strip()]),
+                    keyword_count=len(self.keywords_widget.get_keywords()),
+                    loop_min=int(self.loop_var.get() or "30"),
+                    hours_back=int(self.hours_var.get() or "6"),
+                )
+                self._log("✅ ส่ง Test Telegram สำเร็จ — ตรวจสอบใน Telegram Chat")
+            except Exception as e:
+                self._log(f"❌ Test Telegram ล้มเหลว: {e}")
+        threading.Thread(target=_do_test, daemon=True).start()
+
     def _flash_saved(self, label: ctk.CTkLabel, msg: str, duration_ms: int = 3000):
         """แสดงข้อความ feedback สีเขียวชั่วคราว แล้วกลับไปชื่อไฟล์เดิม"""
         original = label.cget("text")
@@ -1899,6 +2269,7 @@ class ScraperApp(ctk.CTk):
         self.stop_btn.configure(state="normal")
         self.resume_btn.configure(state="normal")
         self.status_lbl.configure(text="⬤  กำลังทำงาน...", text_color="#4CAF50")
+        self._session_start_time = time.time()
 
         self._log(
             f"🚀 เริ่มทำงาน | เพจ: {len(page_urls)} | "
@@ -1970,6 +2341,7 @@ class ScraperApp(ctk.CTk):
         self.stop_btn.configure(state="disabled")
         self.resume_btn.configure(state="disabled")
         self.status_lbl.configure(text="⬤  หยุดทำงาน", text_color="#E53935")
+        self._session_start_time = None
         self.hide_browser_btn.configure(
             state="disabled", text="🙈 ซ่อน Browser", command=self._on_hide_browser
         )
