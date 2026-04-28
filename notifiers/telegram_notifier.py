@@ -6,9 +6,9 @@ TelegramListener  — polling loop รับ callback query (บันทึก/
 """
 
 import threading
-import certifi
 import requests
 from datetime import datetime, timedelta
+from ssl_helper import get_ca_bundle
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -34,14 +34,14 @@ class TelegramNotifier:
             payload["reply_markup"] = keyboard
         try:
             resp = requests.post(
-                self.api_url, 
-                json=payload, 
+                self.api_url,
+                json=payload,
                 timeout=10,
-                verify=certifi.where()  # 👈 เพิ่มบรรทัดนี้
+                verify=get_ca_bundle(),
             )
             return resp.status_code == 200
         except requests.RequestException as e:
-            print(f"⚠️ [Telegram] ส่งข้อความไม่สำเร็จ: {e}")  # 👈 เพิ่มแจ้งเตือน
+            print(f"⚠️ [Telegram] ส่งข้อความไม่สำเร็จ: {e}")
             return False
 
     def _send_photo(self, photo_url: str, caption: str, keyboard: dict = None) -> bool:
@@ -60,11 +60,11 @@ class TelegramNotifier:
                 f"https://api.telegram.org/bot{self.bot_token}/sendPhoto",
                 json=payload,
                 timeout=10,
-                verify=certifi.where()  # 👈 เพิ่มบรรทัดนี้
+                verify=get_ca_bundle(),
             )
             return resp.status_code == 200
         except requests.RequestException as e:
-            print(f"⚠️ [Telegram] ส่งรูปภาพไม่สำเร็จ: {e}")  # 👈 เพิ่มแจ้งเตือน
+            print(f"⚠️ [Telegram] ส่งรูปภาพไม่สำเร็จ: {e}")
             return False
 
     def send_start(self, page_count: int = 0, keyword_count: int = 0, loop_min: int = 0, hours_back: int = 6):
@@ -82,9 +82,9 @@ class TelegramNotifier:
 
     def send_post(self, page_name: str, page_url: str, post_url: str, content: str,
                   found_keywords: list, image_url: str = None):
-        kw_str     = ", ".join(found_keywords) if found_keywords else "-"
-        kw_count   = len(found_keywords)
-        char_count = len(content)
+        kw_str      = ", ".join(found_keywords) if found_keywords else "-"
+        kw_count    = len(found_keywords)
+        char_count  = len(content)
         detected_at = datetime.now().strftime("%d/%m/%Y %H:%M:%S")
         keyboard = {
             "inline_keyboard": [
@@ -192,7 +192,10 @@ class TelegramListener(threading.Thread):
                 if self.offset:
                     payload["offset"] = self.offset
                 resp = requests.post(
-                    self.api_url + "getUpdates", json=payload, timeout=25
+                    self.api_url + "getUpdates",
+                    json=payload,
+                    timeout=25,
+                    verify=get_ca_bundle(),
                 )
                 if resp.status_code == 200:
                     data = resp.json()
@@ -216,6 +219,8 @@ class TelegramListener(threading.Thread):
         if not chat_id or not msg_id:
             return
 
+        ca = get_ca_bundle()
+
         if data == "save_news":
             new_keyboard = {
                 "inline_keyboard": [
@@ -224,23 +229,23 @@ class TelegramListener(threading.Thread):
             }
             requests.post(self.api_url + "editMessageReplyMarkup", json={
                 "chat_id": chat_id, "message_id": msg_id, "reply_markup": new_keyboard
-            })
+            }, verify=ca)
             requests.post(self.api_url + "answerCallbackQuery", json={
                 "callback_query_id": cb_id, "text": "อัปเดตสถานะการบันทึกแล้ว!"
-            })
+            }, verify=ca)
 
         elif data == "delete_news":
             requests.post(self.api_url + "deleteMessage", json={
                 "chat_id": chat_id, "message_id": msg_id
-            })
+            }, verify=ca)
             requests.post(self.api_url + "answerCallbackQuery", json={
                 "callback_query_id": cb_id, "text": "ลบข่าวนี้ออกจากแชทแล้ว"
-            })
+            }, verify=ca)
 
         elif data == "already_saved":
             requests.post(self.api_url + "answerCallbackQuery", json={
                 "callback_query_id": cb_id, "text": "ข่าวนี้ถูกบันทึกไปแล้วครับ!"
-            })
+            }, verify=ca)
 
     def stop(self):
         self._stop_event.set()
