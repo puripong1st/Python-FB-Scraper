@@ -33,12 +33,13 @@ class DiscordNotifier:
         if not self.webhook_url:
             return False
         try:
+            ca_bundle = get_ca_bundle()
             resp = requests.post(
                 self.webhook_url,
                 json=payload,
                 timeout=10,
                 headers={"Content-Type": "application/json"},
-                verify=get_ca_bundle(),
+                verify=ca_bundle if ca_bundle else True,
             )
             return resp.status_code in (200, 204)
         except requests.RequestException as e:

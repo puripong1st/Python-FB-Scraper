@@ -33,11 +33,12 @@ class TelegramNotifier:
         if keyboard:
             payload["reply_markup"] = keyboard
         try:
+            ca_bundle = get_ca_bundle()
             resp = requests.post(
                 self.api_url,
                 json=payload,
                 timeout=10,
-                verify=get_ca_bundle(),
+                verify=ca_bundle if ca_bundle else True,
             )
             return resp.status_code == 200
         except requests.RequestException as e:
@@ -56,11 +57,12 @@ class TelegramNotifier:
         if keyboard:
             payload["reply_markup"] = keyboard
         try:
+            ca_bundle = get_ca_bundle()
             resp = requests.post(
                 f"https://api.telegram.org/bot{self.bot_token}/sendPhoto",
                 json=payload,
                 timeout=10,
-                verify=get_ca_bundle(),
+                verify=ca_bundle if ca_bundle else True,
             )
             return resp.status_code == 200
         except requests.RequestException as e:
@@ -191,11 +193,12 @@ class TelegramListener(threading.Thread):
                 payload = {"timeout": 20}
                 if self.offset:
                     payload["offset"] = self.offset
+                ca_bundle = get_ca_bundle()
                 resp = requests.post(
                     self.api_url + "getUpdates",
                     json=payload,
                     timeout=25,
-                    verify=get_ca_bundle(),
+                    verify=ca_bundle if ca_bundle else True,
                 )
                 if resp.status_code == 200:
                     data = resp.json()
@@ -220,6 +223,7 @@ class TelegramListener(threading.Thread):
             return
 
         ca = get_ca_bundle()
+        verify_flag = ca if ca else True
 
         if data == "save_news":
             new_keyboard = {
@@ -229,23 +233,23 @@ class TelegramListener(threading.Thread):
             }
             requests.post(self.api_url + "editMessageReplyMarkup", json={
                 "chat_id": chat_id, "message_id": msg_id, "reply_markup": new_keyboard
-            }, verify=ca)
+            }, verify=verify_flag)
             requests.post(self.api_url + "answerCallbackQuery", json={
                 "callback_query_id": cb_id, "text": "อัปเดตสถานะการบันทึกแล้ว!"
-            }, verify=ca)
+            }, verify=verify_flag)
 
         elif data == "delete_news":
             requests.post(self.api_url + "deleteMessage", json={
                 "chat_id": chat_id, "message_id": msg_id
-            }, verify=ca)
+            }, verify=verify_flag)
             requests.post(self.api_url + "answerCallbackQuery", json={
                 "callback_query_id": cb_id, "text": "ลบข่าวนี้ออกจากแชทแล้ว"
-            }, verify=ca)
+            }, verify=verify_flag)
 
         elif data == "already_saved":
             requests.post(self.api_url + "answerCallbackQuery", json={
                 "callback_query_id": cb_id, "text": "ข่าวนี้ถูกบันทึกไปแล้วครับ!"
-            }, verify=ca)
+            }, verify=verify_flag)
 
     def stop(self):
         self._stop_event.set()
