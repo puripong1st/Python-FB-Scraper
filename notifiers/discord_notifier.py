@@ -7,6 +7,7 @@ notifiers/discord_notifier.py
 import requests
 import socket
 from datetime import datetime, timedelta, timezone
+import certifi   # 1. เพิ่มการ import certifi เข้ามา
 
 
 class DiscordNotifier:
@@ -37,9 +38,12 @@ class DiscordNotifier:
                 json=payload,
                 timeout=10,
                 headers={"Content-Type": "application/json"},
+                verify=certifi.where()   # 2. บังคับยัด path ใบรับรองตรงๆ บรรทัดนี้
             )
             return resp.status_code in (200, 204)
-        except requests.RequestException:
+        except requests.RequestException as e:
+            # 3. สั่ง print error ออกมาดู จะได้รู้ว่าพังเพราะอะไร แทนที่จะเงียบไปเฉยๆ
+            print(f"⚠️ [Discord] ขออภัย ส่งไม่ได้เนื่องจาก: {e}") 
             return False
 
     def _utc_now_iso(self) -> str:
