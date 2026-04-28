@@ -23,6 +23,7 @@ from selenium.common.exceptions import (
     NoSuchElementException,
     StaleElementReferenceException,
     WebDriverException,
+    InvalidSessionIdException,
 )
 import undetected_chromedriver as uc
 
@@ -70,6 +71,10 @@ class FacebookScraper:
         self._resume_event.set()
         self._is_paused = False
 
+        self._browser_hidden = False   # สถานะซ่อน/แสดง browser
+        self._consecutive_failures = 0 # นับรอบที่ล้มเหลวติดต่อกัน
+        self._cycle_count = 0          # นับรอบสแกนทั้งหมด
+
     # ── Thread-safe driver property ───────────────────────────────────────────
 
     @property
@@ -81,6 +86,162 @@ class FacebookScraper:
     def driver(self, value):
         with self._driver_lock:
             self._driver = value
+
+    # ── Browser hide / show (Windows ctypes) ─────────────────────────────────
+
+    def _collect_chrome_pids(self) -> set:
+        """รวบรวม PID ของ Chrome.exe ทั้งหมดที่ chromedriver เปิดขึ้น (BFS จาก root PID)"""
+        try:
+            drv = self.driver
+            if not drv:
+                return set()
+
+            import subprocess
+            root_pid = drv.service.process.pid
+            pids: set = {root_pid}
+
+            # ลอง wmic ก่อน (Windows 10) → fallback tasklist (Windows 11)
+            children: dict = {}
+            for cmd, parser in [
+                (
+                    ["wmic", "process", "get", "ProcessId,ParentProcessId,Name"],
+                    "wmic",
+                ),
+                (
+                    ["tasklist", "/FO", "CSV", "/NH"],
+                    "tasklist",
+                ),
+            ]:
+                try:
+                    result = subprocess.run(
+                        cmd, capture_output=True, text=True, timeout=5
+                    )
+                    if result.returncode != 0 or not result.stdout.strip():
+                        continue
+
+                    if parser == "wmic":
+                        for line in result.stdout.strip().split("\n")[1:]:
+                            parts = line.strip().split()
+                            if len(parts) >= 2 and parts[-1].isdigit() and parts[-2].isdigit():
+                                ppid = int(parts[-2])
+                                cpid = int(parts[-1])
+                                children.setdefault(ppid, []).append(cpid)
+                    else:
+                        # tasklist ไม่มี PPID ดังนั้นใช้ PowerShell แทน
+                        ps_result = subprocess.run(
+                            ["powershell", "-NoProfile", "-Command",
+                             "Get-WmiObject Win32_Process | Select-Object ProcessId,ParentProcessId | ConvertTo-Csv -NoTypeInformation"],
+                            capture_output=True, text=True, timeout=8
+                        )
+                        for line in ps_result.stdout.strip().split("\n")[1:]:
+                            line = line.strip().strip('"')
+                            parts = [p.strip('"') for p in line.split('","')]
+                            if len(parts) >= 2 and parts[0].isdigit() and parts[1].isdigit():
+                                cpid = int(parts[0])
+                                ppid = int(parts[1])
+                                children.setdefault(ppid, []).append(cpid)
+
+                    if children:
+                        break
+                except Exception:
+                    continue
+
+            queue = [root_pid]
+            while queue:
+                p = queue.pop()
+                for cpid in children.get(p, []):
+                    if cpid not in pids:
+                        pids.add(cpid)
+                        queue.append(cpid)
+            return pids
+        except Exception:
+            return set()
+
+    def _find_browser_hwnds(self) -> list:
+        """ค้นหา HWND (window handle) ของ Chrome ทั้งหมดจาก PID ที่รวบรวมไว้"""
+        try:
+            import ctypes
+            import ctypes.wintypes
+
+            pids = self._collect_chrome_pids()
+            if not pids:
+                return []
+
+            found: list = []
+            EnumProc = ctypes.WINFUNCTYPE(
+                ctypes.c_bool, ctypes.wintypes.HWND, ctypes.wintypes.LPARAM
+            )
+
+            def _cb(hwnd, _):
+                win_pid = ctypes.c_ulong(0)
+                ctypes.windll.user32.GetWindowThreadProcessId(hwnd, ctypes.byref(win_pid))
+                if win_pid.value in pids:
+                    # เฉพาะ top-level window ที่มี title text เท่านั้น
+                    length = ctypes.windll.user32.GetWindowTextLengthW(hwnd)
+                    if length > 0:
+                        found.append(hwnd)
+                return True
+
+            ctypes.windll.user32.EnumWindows(EnumProc(_cb), 0)
+            return found
+        except Exception as e:
+            self.log(f"⚠️ _find_browser_hwnds: {e}")
+            return []
+
+    def hide_browser(self):
+        """ซ่อนหน้าต่าง Browser ออกจากหน้าจอและ Taskbar"""
+        try:
+            import ctypes
+            SW_HIDE = 0
+            hwnds = self._find_browser_hwnds()
+            hidden = 0
+            for hwnd in hwnds:
+                if ctypes.windll.user32.IsWindowVisible(hwnd):
+                    ctypes.windll.user32.ShowWindow(hwnd, SW_HIDE)
+                    hidden += 1
+            if hidden:
+                self.log(f"👻 ซ่อน Browser แล้ว ({hidden} หน้าต่าง)")
+            self._browser_hidden = True
+        except Exception as e:
+            self.log(f"⚠️ hide_browser: {e}")
+
+    def show_browser(self):
+        """แสดงหน้าต่าง Browser กลับมาที่หน้าจอ"""
+        try:
+            import ctypes
+            SW_RESTORE = 9
+            hwnds = self._find_browser_hwnds()
+            shown = 0
+            for hwnd in hwnds:
+                ctypes.windll.user32.ShowWindow(hwnd, SW_RESTORE)
+                ctypes.windll.user32.SetForegroundWindow(hwnd)
+                shown += 1
+            if shown:
+                self.log(f"👁️ แสดง Browser แล้ว ({shown} หน้าต่าง)")
+            self._browser_hidden = False
+        except Exception as e:
+            self.log(f"⚠️ show_browser: {e}")
+
+    def _safe_quit_driver(self):
+        """ปิด Browser อย่างปลอดภัย — ไม่ throw exception ไม่ว่ากรณีใด"""
+        drv = self.driver
+        if drv is None:
+            return
+        try:
+            drv.quit()
+        except Exception:
+            pass
+        finally:
+            self.driver = None
+            self._browser_hidden = False
+
+    def _sleep_interruptible(self, seconds: float, step: float = 5.0):
+        """sleep ที่ตรวจ stop_event ทุก step วินาที — หยุดได้ทันทีเมื่อ stop"""
+        elapsed = 0.0
+        while elapsed < seconds and not self._stop_event.is_set():
+            chunk = min(step, seconds - elapsed)
+            time.sleep(chunk)
+            elapsed += chunk
 
     # ─────────────────────────────────────────────────────────────────────────
     # Browser lifecycle
@@ -121,7 +282,7 @@ class FacebookScraper:
             "(Get-Item (Get-Command chrome).Source).VersionInfo.ProductVersion",
             r"(Get-Item 'C:\Program Files\Google\Chrome\Application\chrome.exe').VersionInfo.ProductVersion",
             r"(Get-Item 'C:\Program Files (x86)\Google\Chrome\Application\chrome.exe').VersionInfo.ProductVersion",
-            r"(Get-Item ""$env:LOCALAPPDATA\Google\Chrome\Application\chrome.exe"").VersionInfo.ProductVersion",
+            r'(Get-Item "$env:LOCALAPPDATA\Google\Chrome\Application\chrome.exe").VersionInfo.ProductVersion',
         ]
         for ps_cmd in _ps_commands:
             try:
@@ -158,23 +319,33 @@ class FacebookScraper:
         if not chrome_version:
             self.log("⚠️ ตรวจไม่พบเวอร์ชัน Chrome — จะปล่อยให้ระบบเดาอัตโนมัติ")
 
-        # 5. เปิด Browser พร้อม Fallback 3 ชั้น
-        try:
-            if chrome_version:
-                self.driver = uc.Chrome(options=_make_options(), use_subprocess=True, version_main=chrome_version)
-            else:
-                self.driver = uc.Chrome(options=_make_options(), use_subprocess=True)
-        except Exception as e:
-            self.log(f"⚠️ โหลด Chrome ปกติล้มเหลว ({e})")
-            self.log("🔄 กำลัง Fallback ลองแบบไม่ระบุเวอร์ชัน...")
-            try:
-                self.driver = uc.Chrome(options=_make_options(), use_subprocess=True)
-            except Exception as e2:
-                self.log(f"❌ ระบบ Auto ล้มเหลว... ขอลองไม้ตายสุดท้าย")
-                self.driver = uc.Chrome(options=_make_options(), use_subprocess=True, version_main=147)
+        # 5. เปิด Browser — ลองสูงสุด 3 รอบ แต่ละรอบ cleanup ก่อนลองใหม่
+        strategies = []
+        if chrome_version:
+            strategies.append({"version_main": chrome_version})
+        strategies.append({})          # auto-detect
+        strategies.append({"version_main": None})  # ลองอีกครั้งแบบ auto
 
-        self.driver.set_page_load_timeout(60)
-        self.log("🌐 เปิด Browser สำเร็จ")
+        last_err = None
+        for attempt, kwargs in enumerate(strategies, 1):
+            # ลบ key ที่ value=None ออก
+            kwargs = {k: v for k, v in kwargs.items() if v is not None}
+            try:
+                self.log(f"🔄 เปิด Browser รอบที่ {attempt}/{len(strategies)} {kwargs or '(auto)'}")
+                self._safe_quit_driver()   # cleanup ซากจากรอบที่แล้ว
+                time.sleep(1)
+                self.driver = uc.Chrome(options=_make_options(), use_subprocess=True, **kwargs)
+                self.driver.set_page_load_timeout(60)
+                self.log("🌐 เปิด Browser สำเร็จ")
+                return                     # ออกทันทีเมื่อสำเร็จ
+            except Exception as e:
+                last_err = e
+                self.log(f"⚠️ รอบ {attempt} ล้มเหลว: {e}")
+                self._safe_quit_driver()
+                if attempt < len(strategies):
+                    time.sleep(3)
+
+        raise RuntimeError(f"❌ เปิด Browser ไม่สำเร็จหลัง {len(strategies)} รอบ: {last_err}")
 
     # ── Cookies ───────────────────────────────────────────────────────────────
 
@@ -408,6 +579,7 @@ class FacebookScraper:
 
     def _handle_obstacle(self, obstacle_type: str, page_url: str = ""):
         self.log(f"🚨 ติด {obstacle_type} — หยุดรอผู้ใช้แก้ไข กด Resume เมื่อเสร็จ")
+        self.show_browser()          # ← แสดง Browser ให้ user แก้ปัญหาได้
         self.discord.send_obstacle(obstacle_type, page_url)
         self.tg.send_obstacle(obstacle_type, page_url)
         self._resume_event.clear()
@@ -415,6 +587,7 @@ class FacebookScraper:
         self._resume_event.wait()
         self._is_paused = False
         self.log("▶️ Resume แล้ว — กลับมาทำงานต่อ")
+        self.hide_browser()          # ← ซ่อนกลับหลัง resume
 
     def resume(self):
         self._resume_event.set()
@@ -596,6 +769,7 @@ class FacebookScraper:
         consecutive_old     = 0
         seen_this_run: set  = set()
         stop_early = False
+        scroll_rounds = 0   # ← กำหนดก่อน try เพื่อป้องกัน UnboundLocalError
 
         try:
             self.log(f"🔍 กำลังเข้าเพจ: {page_url}")
@@ -613,6 +787,8 @@ class FacebookScraper:
             last_article_count = 0
             no_growth_rounds   = 0
             MAX_NO_GROWTH      = 4
+            rounds_without_new_urls = 0      # ← นับรอบที่ scroll แล้วไม่พบ URL ใหม่เลย
+            MAX_NO_NEW_URL_ROUNDS   = 3      # ← หยุดถ้าไม่พบ URL ใหม่ติดต่อกัน N รอบ
 
             while not self._stop_event.is_set() and not stop_early and scroll_rounds < MAX_SCROLL_ROUNDS:
                 self._slow_scroll(scrolls=4, pause=2.0)
@@ -701,7 +877,7 @@ class FacebookScraper:
                                 const timeLinks = art.querySelectorAll('a[role="link"] > span, a[href*="/posts/"] > span');
                                 for (const sp of timeLinks) {
                                     const lbl = sp.getAttribute('aria-label') || sp.title || '';
-                                    if (lbl && /\d/.test(lbl)) { timeLabel = lbl; break; }
+                                    if (lbl && /\\d/.test(lbl)) { timeLabel = lbl; break; }
                                 }
                             }
                             return { postUrl, postText, imageUrl, rawText, utime, timeLabel };
@@ -838,17 +1014,32 @@ class FacebookScraper:
                         self.log(f"⚠️ ข้ามโพสต์ที่อ่านไม่ได้: {type(e).__name__}: {e}")
                         continue
 
-                if not new_in_this_round and no_growth_rounds >= MAX_NO_GROWTH:
-                    self.log(f"📄 ไม่มีโพสต์ใหม่และหน้าหยุดโหลดแล้ว บนเพจ {page_name} — จบการสแกน")
-                    break
+                # ── ตรวจ URL ใหม่ต่อรอบ (แก้ dead-code เดิม) ───────────────────
+                if new_in_this_round:
+                    rounds_without_new_urls = 0
+                else:
+                    rounds_without_new_urls += 1
+                    self.log(
+                        f"⚠️ [{page_name}] ไม่พบ URL ใหม่รอบนี้ "
+                        f"({rounds_without_new_urls}/{MAX_NO_NEW_URL_ROUNDS})"
+                    )
+                    if rounds_without_new_urls >= MAX_NO_NEW_URL_ROUNDS:
+                        self.log(
+                            f"📄 ไม่พบ URL ใหม่ติดต่อกัน {MAX_NO_NEW_URL_ROUNDS} รอบ "
+                            f"บนเพจ {page_name} — จบการสแกน"
+                        )
+                        break
 
-            self.log(f"📊 สแกนเพจ {page_name} เสร็จ | Scroll {scroll_rounds} รอบ | โพสต์ใหม่: {new_posts}")
-
+        except InvalidSessionIdException as e:
+            # Session หมดอายุ (browser crash กลางคัน) — re-raise ให้ run() รับรู้และเปิด browser ใหม่
+            self.log(f"❌ Browser session หมดอายุระหว่างสแกน {page_name} — จะเปิด Browser ใหม่รอบหน้า")
+            raise
         except WebDriverException as e:
             self.log(f"❌ WebDriver Error ที่เพจ {page_name}: {e}")
         except Exception as e:
             self.log(f"❌ Error scraping {page_name}: {e}")
 
+        self.log(f"📊 สแกนเพจ {page_name} เสร็จ | Scroll {scroll_rounds} รอบ | โพสต์ใหม่: {new_posts}")
         return new_posts
 
     # ── Main run loop ─────────────────────────────────────────────────────────
@@ -862,84 +1053,114 @@ class FacebookScraper:
         hours_back: int,
         loop_minutes: int,
     ):
+        MAX_CONSECUTIVE_FAILURES = 5   # หยุดถ้าล้มเหลวติดต่อกันเกิน N รอบ
+        RETRY_WAIT_SECONDS       = 300 # รอ 5 นาทีก่อน retry เมื่อ cycle ล้มเหลว
+
         _started_successfully = False
+        _session_start = time.time()
+        _total_posts_all_cycles = 0
+        last_cleanup_date = None
 
         try:
             self.discord.send_start(len(page_urls), len(keywords), loop_minutes, hours_back)
             self.tg.send_start(len(page_urls), len(keywords), loop_minutes, hours_back)
             _started_successfully = True
-            last_cleanup_date = None
-            _session_start = time.time()
-            _total_posts_all_cycles = 0
 
+            # ════════════════════════════════════════════════════════════
+            # Main loop — แต่ละรอบ wrap ด้วย try/except เพื่อ retry
+            # ════════════════════════════════════════════════════════════
             while not self._stop_event.is_set():
-                now = datetime.now()
 
-                # ล้าง DB เก่าทุกเช้า 09:00
+                # ── ล้าง DB เก่าทุกเช้า 09:00 ─────────────────────────
+                now = datetime.now()
                 if now.hour >= 9 and last_cleanup_date != now.date():
                     self.log("🧹 ถึงเวลา 09:00 น. | เริ่มล้างข้อมูล Database เก่า...")
                     if self.db.cleanup_old_data():
                         self.log("✅ ลบข้อมูลเก่าสำเร็จและคืนพื้นที่แล้ว")
                     last_cleanup_date = now.date()
 
+                self._cycle_count += 1
                 cycle_start = time.time()
                 self.log(f"\n{'='*50}")
-                self.log(f"🔄 เริ่มรอบสแกนใหม่ | {now.strftime('%d/%m/%Y %H:%M:%S')}")
+                self.log(f"🔄 รอบที่ {self._cycle_count} | {now.strftime('%d/%m/%Y %H:%M:%S')}")
 
-                # เปิด Browser สดใหม่ทุกรอบ
-                self._start_browser()
-                if not self._load_cookies():
-                    self.log("🔑 ไม่มี Session เดิม — เริ่มล็อกอินใหม่")
-                    if not self.login(email, password):
-                        self.log("❌ Login ล้มเหลว — หยุดทำงาน")
-                        self._stop_event.set()
-                        break
+                cycle_ok = False
+                try:
+                    # ── เปิด Browser ──────────────────────────────────
+                    self._start_browser()
 
-                total_new = 0
-                for url in page_urls:
+                    # ── Login / Load cookies ───────────────────────────
+                    if not self._load_cookies():
+                        self.log("🔑 ไม่มี Session เดิม — เริ่มล็อกอินใหม่")
+                        if not self.login(email, password):
+                            raise RuntimeError("Login ล้มเหลว — cookies หมดอายุหรือ password ผิด")
+
+                    # ── ซ่อน Browser ─────────────────────────────────
+                    time.sleep(1)
+                    self.hide_browser()
+
+                    # ── สแกนทุกเพจ ────────────────────────────────────
+                    total_new = 0
+                    for url in page_urls:
+                        if self._stop_event.is_set():
+                            break
+                        url = url.strip()
+                        if not url:
+                            continue
+                        count = self.scrape_page(url, keywords, hours_back)
+                        total_new += count
+                        self.log(f"📊 เพจ {url.split('/')[-1]}: พบ {count} โพสต์ใหม่")
+                        if not self._stop_event.is_set():
+                            time.sleep(random.uniform(2.0, 5.0))
+
                     if self._stop_event.is_set():
                         break
-                    url = url.strip()
-                    if not url:
-                        continue
-                    count = self.scrape_page(url, keywords, hours_back)
-                    total_new += count
-                    self.log(f"📊 เพจ {url.split('/')[-1]}: พบ {count} โพสต์ใหม่")
-                    if not self._stop_event.is_set():
-                        time.sleep(random.uniform(2.0, 5.0))
+
+                    _total_posts_all_cycles += total_new
+                    duration = time.time() - cycle_start
+                    self.log(f"✅ รอบสแกนเสร็จ | พบโพสต์ใหม่รวม: {total_new}")
+                    self.discord.send_cycle_complete(duration, loop_minutes, total_new, len(page_urls))
+                    self.tg.send_cycle_complete(duration, loop_minutes, total_new, len(page_urls))
+
+                    self._consecutive_failures = 0   # reset เมื่อสำเร็จ
+                    cycle_ok = True
+
+                except Exception as e:
+                    self._consecutive_failures += 1
+                    self.log(
+                        f"❌ รอบ {self._cycle_count} ล้มเหลว "
+                        f"({self._consecutive_failures}/{MAX_CONSECUTIVE_FAILURES}): "
+                        f"{type(e).__name__}: {e}"
+                    )
+                    if self._consecutive_failures >= MAX_CONSECUTIVE_FAILURES:
+                        self.log(
+                            f"🔴 ล้มเหลวติดต่อกัน {MAX_CONSECUTIVE_FAILURES} รอบ — หยุดทำงาน"
+                        )
+                        self.discord.send_obstacle(
+                            f"FATAL: ล้มเหลว {MAX_CONSECUTIVE_FAILURES} รอบติด", ""
+                        )
+                        self.tg.send_obstacle(
+                            f"FATAL: ล้มเหลว {MAX_CONSECUTIVE_FAILURES} รอบติด", ""
+                        )
+                        break
+
+                finally:
+                    # ── ปิด Browser ทุกกรณี — ปลอดภัยสมบูรณ์ ─────────
+                    self.log("🛑 ปิด Browser ชั่วคราว...")
+                    self._safe_quit_driver()
 
                 if self._stop_event.is_set():
                     break
 
-                _total_posts_all_cycles += total_new
+                # ── นับถอยหลังก่อนรอบถัดไป ────────────────────────────
+                if cycle_ok:
+                    wait_secs = loop_minutes * 60
+                    self.log(f"⏳ รอ {loop_minutes} นาทีก่อนรอบถัดไป...")
+                else:
+                    wait_secs = RETRY_WAIT_SECONDS
+                    self.log(f"🔄 รอ {RETRY_WAIT_SECONDS // 60} นาทีก่อน retry...")
 
-                duration = time.time() - cycle_start
-                self.log(f"✅ รอบสแกนเสร็จ | พบโพสต์ใหม่รวม: {total_new}")
-                self.discord.send_cycle_complete(duration, loop_minutes, total_new, len(page_urls))
-                self.tg.send_cycle_complete(duration, loop_minutes, total_new, len(page_urls))
-
-                # ปิด Browser ระหว่างรอ
-                self.log("🛑 ปิด Browser ชั่วคราวเพื่อประหยัดทรัพยากรระหว่างรอรอบถัดไป...")
-                if self.driver:
-                    try:
-                        self.driver.close()
-                        time.sleep(1)
-                        self.driver.quit()
-                    except Exception as e:
-                        self.log(f"⚠️ เกิดข้อผิดพลาดตอนสั่งปิด Browser: {e}")
-                    finally:
-                        self.driver = None
-
-                # นับถอยหลัง
-                sleep_total = loop_minutes * 60
-                sleep_step  = 5
-                elapsed     = 0
-                while elapsed < sleep_total and not self._stop_event.is_set():
-                    remaining = sleep_total - elapsed
-                    if elapsed % 60 == 0:
-                        self.log(f"⏳ รอ {int(remaining // 60)}m {int(remaining % 60)}s ก่อนรอบถัดไป...")
-                    time.sleep(min(sleep_step, remaining))
-                    elapsed += sleep_step
+                self._sleep_interruptible(wait_secs)
 
         except OSError as e:
             if "cacert.pem" in str(e) or "certificate" in str(e).lower():
@@ -947,20 +1168,15 @@ class FacebookScraper:
             else:
                 self.log(f"❌ Fatal OSError ใน Scraper Thread: {e}")
         except Exception as e:
-            self.log(f"❌ Fatal Error ใน Scraper Thread: {e}")
+            self.log(f"❌ Fatal Error ใน Scraper Thread: {type(e).__name__}: {e}")
         finally:
             if _started_successfully:
                 total_runtime = time.time() - _session_start
                 self.discord.send_stopped(total_runtime, _total_posts_all_cycles)
                 self.tg.send_stopped(total_runtime, _total_posts_all_cycles)
 
-            if self.driver:
-                self.log("🛑 สิ้นสุดการทำงาน — กำลังเคลียร์ Browser...")
-                try:
-                    self.driver.quit()
-                except Exception:
-                    pass
-                self.driver = None
+            self._safe_quit_driver()
+            self.log("🏁 Scraper หยุดทำงานสมบูรณ์")
 
     def stop(self):
         self._stop_event.set()
