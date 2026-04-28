@@ -6,6 +6,7 @@ TelegramListener  — polling loop รับ callback query (บันทึก/
 """
 
 import threading
+import certifi
 import requests
 from datetime import datetime, timedelta
 
@@ -32,9 +33,15 @@ class TelegramNotifier:
         if keyboard:
             payload["reply_markup"] = keyboard
         try:
-            resp = requests.post(self.api_url, json=payload, timeout=10)
+            resp = requests.post(
+                self.api_url, 
+                json=payload, 
+                timeout=10,
+                verify=certifi.where()  # 👈 เพิ่มบรรทัดนี้
+            )
             return resp.status_code == 200
-        except requests.RequestException:
+        except requests.RequestException as e:
+            print(f"⚠️ [Telegram] ส่งข้อความไม่สำเร็จ: {e}")  # 👈 เพิ่มแจ้งเตือน
             return False
 
     def _send_photo(self, photo_url: str, caption: str, keyboard: dict = None) -> bool:
@@ -53,9 +60,11 @@ class TelegramNotifier:
                 f"https://api.telegram.org/bot{self.bot_token}/sendPhoto",
                 json=payload,
                 timeout=10,
+                verify=certifi.where()  # 👈 เพิ่มบรรทัดนี้
             )
             return resp.status_code == 200
-        except requests.RequestException:
+        except requests.RequestException as e:
+            print(f"⚠️ [Telegram] ส่งรูปภาพไม่สำเร็จ: {e}")  # 👈 เพิ่มแจ้งเตือน
             return False
 
     def send_start(self, page_count: int = 0, keyword_count: int = 0, loop_min: int = 0, hours_back: int = 6):
